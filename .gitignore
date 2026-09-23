@@ -1,0 +1,13 @@
+# Local build output
+/build/
+/cmake-build-*/
+
+# IDE state
+/.idea/
+
+# Locally installed RISC-V toolchain (keep project sources under hostutil)
+/hostutil/bin/
+/hostutil/lib/
+/hostutil/libexec/
+/hostutil/share/
+/hostutil/riscv32-dxxdx-elf/
