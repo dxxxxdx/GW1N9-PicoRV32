@@ -6,10 +6,12 @@
 //   - start 按键确认装载完成并释放 PicoRV32；
 //   - 16 KiB 数据 RAM 使用普通 reg 数组；
 //   - UART TX 位于 MMIO 0x0100_0000 的前三个字节；
+//   - irq_n 按键经消抖后产生一个时钟周期的脉冲，接到 PicoRV32 的 irq bit 3
+//     （hostutil 里的 IRQ_CH0），固件侧由 IRQ_Ch0_Handler() 处理；
 //   - 不实例化 SPI Flash，4 MiB 预留窗口为空。
 //
-// reset_n 和 start 都是低有效物理按键：默认上拉为 1，按下接地为 0。
-// 二者都经过消抖，
+// reset_n、start、irq_n 都是低有效物理按键：默认上拉为 1，按下接地为 0。
+// 三者都经过消抖，
 // start 应在最后一个 UART 字节发送完成后再按下。
 module rv32top #(
     // 50 MHz 下 2,500,000 拍 = 50 ms；仿真可覆盖成较小值。
@@ -18,6 +20,7 @@ module rv32top #(
     input  wire        clock50MHz,
     input  wire        reset_n,
     input  wire        start,
+    input  wire        irq_n,
     input  wire        uartRx,
     output wire        uartTx,
     output wire        trap
@@ -51,6 +54,25 @@ module rv32top #(
         .debounced_n(unused_startDebounced_n),
         .pressPulse(startRequest)
     );
+
+    // 中断按键：同样默认上拉、按下接地。pressPulse 只高一个 50 MHz 周期，
+    // 正好适合直接接中断线——线必须在 handler 执行 retirq 之前落下，脉冲源
+    // 天然满足；换成电平的话按住不放会反复重进中断。
+    wire irqRequest;
+    wire unused_irqDebounced_n;
+    ButtonDebounce #(
+        .FILTER_CYCLES(BUTTON_FILTER_CYCLES)
+    ) irqButton (
+        .clock50MHz(clock50MHz),
+        .reset_n(systemReset_n),
+        .button_n(irq_n),
+        .debounced_n(unused_irqDebounced_n),
+        .pressPulse(irqRequest)
+    );
+
+    // 中断线向量：目前只用了 bit 3，也就是 hostutil 里的 IRQ_CH0。
+    // bit 0/1/2 被 core 内部占用（timer / EBREAK / 总线错误），不要接外部信号。
+    wire [31:0] irqLines = {28'd0, irqRequest, 3'd0};
 
     // ---------------------------------------------------------------------
     // UART 程序装载
@@ -153,9 +175,10 @@ module rv32top #(
         .ENABLE_MUL(0),
         .ENABLE_FAST_MUL(0),
         .ENABLE_DIV(0),
-        .ENABLE_IRQ(0),
+        .ENABLE_IRQ(1),
         .ENABLE_TRACE(0),
-        .PROGADDR_RESET(32'h0000_0000),
+        .PROGADDR_RESET(32'h0000_0100),
+        .PROGADDR_IRQ(32'h0000_0000),
         .STACKADDR(32'h0000_8000)
     ) cpu (
         .clk(clock50MHz),
@@ -181,7 +204,7 @@ module rv32top #(
         .pcpi_rd(32'd0),
         .pcpi_wait(1'b0),
         .pcpi_ready(1'b0),
-        .irq(32'd0),
+        .irq(irqLines),
         .eoi(eoi),
         .trace_valid(trace_valid),
         .trace_data(trace_data)
@@ -287,7 +310,8 @@ module rv32top #(
                             reserved_addr, reserved_wdata, reserved_wstrb,
                             unmapped_valid, uartIdle,
                             unused_resetPressPulse,
-                            unused_startDebounced_n};
+                            unused_startDebounced_n,
+                            unused_irqDebounced_n};
 endmodule
 
 `default_nettype wire

@@ -45,7 +45,7 @@ GW1N-9_rv32/
 │   │   ├── UARTTX.v         # 50 MHz / 115200 / 8-N-1 发送器
 │   │   └── UARTTX_MMIO.v    # PicoRV32 总线到 UART TX 的 MMIO 包装
 │   └── miscmodule/
-│       └── ButtonDebounce.v # RESET/START 低有效按键消抖
+│       └── ButtonDebounce.v # RESET/START/IRQ 低有效按键消抖
 ├── tools/
 │   └── uart_loader_gui.py   # 图形化程序下载和串口监听工具
 ├── legacy/
@@ -82,6 +82,7 @@ rv32/miscmodule/ButtonDebounce.v
 | `clock50MHz` | 输入 | 50 MHz 主时钟 |
 | `reset_n` | 输入 | 低有效物理按键，板上默认上拉 |
 | `start` | 输入 | 低有效物理按键，确认下载完成并启动 CPU |
+| `irq_n` | 输入 | 低有效物理按键，按下产生一拍脉冲，接 PicoRV32 的 irq bit 3（`IRQ_CH0`） |
 | `uartRx` | 输入 | 115200 baud、8-N-1 |
 | `uartTx` | 输出 | 115200 baud、8-N-1，空闲为高 |
 | `trap` | 输出 | PicoRV32 非法指令、地址错误等陷阱指示 |

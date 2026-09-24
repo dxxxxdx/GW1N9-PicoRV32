@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 
 # Use a local bare-metal RISC-V toolchain when present, otherwise search PATH.
+# Besides hostutil/bin, locally unpacked toolchains under ~/gccs are picked up
+# automatically (for example an xPack riscv-none-elf-gcc release).
 set(CMAKE_SYSTEM_NAME Generic)
 set(CMAKE_SYSTEM_PROCESSOR riscv32)
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
@@ -18,17 +20,29 @@ set(LOCAL_RISCV_GCC
 if(EXISTS "${LOCAL_RISCV_GCC}")
     set(RISCV_GCC "${LOCAL_RISCV_GCC}")
 else()
+    # Locations of locally installed toolchains, e.g.
+    #   ~/gccs/<toolchain>/bin
+    #   ~/gccs/xpack-riscv-none-elf-gcc-<version>-linux-x64/xpack-.../bin
+    file(GLOB RISCV_TOOLCHAIN_HINTS
+        "$ENV{HOME}/gccs/*/bin"
+        "$ENV{HOME}/gccs/*/*/bin"
+        "$ENV{HOME}/wchgcc/*/bin"
+    )
+
     find_program(RISCV_GCC
         NAMES
             "${RISCV_TOOLCHAIN_TRIPLE}-gcc"
+            riscv-none-elf-gcc
             riscv32-unknown-elf-gcc
+        HINTS ${RISCV_TOOLCHAIN_HINTS}
         DOC "RISC-V bare-metal GCC")
 endif()
 
 if(NOT RISCV_GCC)
     message(FATAL_ERROR
         "RISC-V GCC was not found. Set RISCV_TOOLCHAIN_BIN and "
-        "RISCV_TOOLCHAIN_TRIPLE, or add the toolchain to PATH.")
+        "RISCV_TOOLCHAIN_TRIPLE, install a toolchain under ~/gccs "
+        "(e.g. an xPack riscv-none-elf-gcc release), or add it to PATH.")
 endif()
 
 get_filename_component(TOOLCHAIN_BIN "${RISCV_GCC}" DIRECTORY)
@@ -64,7 +78,9 @@ set(FIRMWARE_ASM "${CMAKE_CURRENT_BINARY_DIR}/helloworld.asm")
 add_executable(firmware
     helloworld/main.c
     hostutil/include/UART.c
+    hostutil/include/IRQ.c
     hostutil/dxxdx_start_ld/start.S
+    hostutil/dxxdx_start_ld/vectors.S
 )
 
 set_target_properties(firmware PROPERTIES
