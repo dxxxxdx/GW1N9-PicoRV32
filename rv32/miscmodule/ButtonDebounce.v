@@ -3,14 +3,14 @@
 
 // 单个低有效按键的两级同步与消抖。每个物理按键各实例化一次。
 module ButtonDebounce #(
-    // 50 MHz 下 2,500,000 拍 = 50 ms；有效范围 1~4,194,303。
+    // 80 MHz 下 4,000,000 拍 = 50 ms；有效范围 1~4,194,303。
     parameter [21:0] FILTER_CYCLES = 22'd2_500_000,
     // 复位键用 1：按下后只等同步，不等 50 ms；松开仍消抖 50 ms。
     parameter integer FAST_PRESS = 0,
     // 复位键用 1：FPGA 上电时先视为按下，保持系统复位。
     parameter integer POWERUP_PRESSED = 0
 ) (
-    input  wire clock50MHz,
+    input  wire clk,
     input  wire reset_n,      // 本实例的同步复位；复位键实例接 1'b1。
     input  wire button_n,     // 物理按键：按下为 0，松开为 1。
     output wire debounced_n,  // 已确认的按键电平，按下为 0。
@@ -18,7 +18,7 @@ module ButtonDebounce #(
 );
     localparam [21:0] FILTER_LAST = FILTER_CYCLES - 22'd1;
 
-    // 前两级触发器把异步按键采样到 50 MHz 时钟域。
+    // 前两级触发器把异步按键采样到系统时钟域。
     // 初值确保复位键上电时先保持按下；启动键上电时先保持松开。
     reg buttonMeta = (POWERUP_PRESSED != 0) ? 1'b0 : 1'b1;
     reg buttonSync = (POWERUP_PRESSED != 0) ? 1'b0 : 1'b1;
@@ -31,7 +31,7 @@ module ButtonDebounce #(
     assign debounced_n = !pressed;
     assign pressPulse = pulse;
 
-    always @(posedge clock50MHz) begin
+    always @(posedge clk) begin
         if (!reset_n) begin
             buttonMeta <= (POWERUP_PRESSED != 0) ? 1'b0 : 1'b1;
             buttonSync <= (POWERUP_PRESSED != 0) ? 1'b0 : 1'b1;

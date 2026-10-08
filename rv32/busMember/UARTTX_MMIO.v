@@ -15,8 +15,11 @@
 // 写发送使能时，如果 UARTTX 还忙，mmio_ready 会保持为 0。PicoRV32 会保持
 // 整个请求，直到 UARTTX 空闲并在同一个上升沿接受数据。状态读取不阻塞，
 // 否则软件永远读不到“忙”的 0。
-module UARTTX_MMIO (
-    input  wire        clock50MHz,
+module UARTTX_MMIO #(
+    // 透传给 UARTTX，用来算 115200 的位周期。
+    parameter integer CLK_HZ = 50_000_000
+) (
+    input  wire        clk,
     input  wire        reset_n,
 
     input  wire        mmio_valid,
@@ -49,8 +52,10 @@ module UARTTX_MMIO (
 
     assign uartIdle = txByteReady;
 
-    UARTTX transmitter (
-        .clock50MHz(clock50MHz),
+    UARTTX #(
+        .CLK_HZ(CLK_HZ)
+    ) transmitter (
+        .clk(clk),
         .reset_n(reset_n),
         .byteData(txByteData),
         .byteValid(txByteValid),
@@ -83,7 +88,7 @@ module UARTTX_MMIO (
 
     // 只有总线事务真正完成时才更新暂存寄存器。发送请求被阻塞期间，数据
     // 保持稳定；若 DATA 和 ENABLE 同拍写入，UARTTX 使用上面的旁路值。
-    always @(posedge clock50MHz) begin
+    always @(posedge clk) begin
         if (!reset_n) begin
             txData <= 8'd0;
         end else if (mmio_valid && mmio_ready && uartWordSelected &&

@@ -79,8 +79,10 @@ add_executable(firmware
     helloworld/main.c
     hostutil/include/UART.c
     hostutil/include/IRQ.c
+    hostutil/include/PSRAM.c
     hostutil/dxxdx_start_ld/start.S
     hostutil/dxxdx_start_ld/vectors.S
+        hostutil/include/PSRAM.h
 )
 
 set_target_properties(firmware PROPERTIES

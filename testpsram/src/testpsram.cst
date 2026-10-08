@@ -1,0 +1,16 @@
+//------------------------------------------------------------------------------
+// testpsram.cst
+//
+// 只约束真正的外部引脚。
+//
+// ！！PSRAM 的 O_psram_ck / O_psram_ck_n / O_psram_cs_n / O_psram_reset_n /
+//    IO_psram_dq / IO_psram_rwds 是封装内部 pin，绝对不要写进这里。
+//    Gowin 靠顶层端口名把她们自动绑到内部 PSRAM 上；写了反而可能报错。
+//------------------------------------------------------------------------------
+
+IO_LOC "clock50MHz" 63;
+IO_PORT "clock50MHz" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+
+// 想加个 LED 看波形的话，把你板子上 LED 的脚写在这里，并给 top 加端口：
+// IO_LOC "led[0]" 10;
+// IO_PORT "led[0]" PULL_MODE=UP DRIVE=8;

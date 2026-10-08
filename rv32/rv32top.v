@@ -1,23 +1,39 @@
 `timescale 1ns / 1ps
 `default_nettype none
 
-// 第一版最小 RV32 系统：
+// 最小 RV32 系统 + GW1NR-9C 内嵌 PSRAM：
 //   - UART RX 裸字节流装载 16 KiB 程序 reg 数组；
 //   - start 按键确认装载完成并释放 PicoRV32；
 //   - 16 KiB 数据 RAM 使用普通 reg 数组；
 //   - UART TX 位于 MMIO 0x0100_0000 的前三个字节；
 //   - irq_n 按键经消抖后产生一个时钟周期的脉冲，接到 PicoRV32 的 irq bit 3
 //     （hostutil 里的 IRQ_CH0），固件侧由 IRQ_Ch0_Handler() 处理；
-//   - 不实例化 SPI Flash，4 MiB 预留窗口为空。
+//   - 50MHz 晶振经 rPLL 倍到 80MHz，整个系统（含 PSRAM PHY）统一跑 80MHz；
+//   - PSRAM 4 MiB 数据窗口 0x0200_0000~0x023f_ffff，当普通内存读写；
+//   - PSRAM 配置窗口 0x0300_0000，放 rdLat / wrLat 和状态；
+//   - 不实例化 SPI Flash。
 //
 // reset_n、start、irq_n 都是低有效物理按键：默认上拉为 1，按下接地为 0。
 // 三者都经过消抖，
 // start 应在最后一个 UART 字节发送完成后再按下。
 module rv32top #(
-    // 50 MHz 下 2,500,000 拍 = 50 ms；仿真可覆盖成较小值。
-    parameter [21:0] BUTTON_FILTER_CYCLES = 22'd2_500_000
+    // 系统时钟频率。PicoRV32 走 PLL 时钟时 Fmax 只有 ~46MHz（见 gowin_rpll.v
+    // 里的实测对比），所以系统跑 40MHz，PSRAM PHY 也 1:1 跑 40MHz。
+    // 改这个值的时候，gowin_rpll.v 的输出频率和 BUTTON_FILTER_CYCLES 要一起改。
+    parameter integer SYS_CLK_HZ = 40_000_000,
+    // 50 ms 消抖窗口 = SYS_CLK_HZ / 20；仿真可覆盖成较小值。
+    parameter [21:0] BUTTON_FILTER_CYCLES = 22'd2_000_000
 ) (
-    input  wire        clock50MHz,
+    input  wire        clock50MHz,      // 50 MHz 晶振
+
+    // 内嵌 PSRAM 的 magic 端口：名字一个字都不能改，也不要写进 cst
+    output wire [1:0]  O_psram_ck,
+    output wire [1:0]  O_psram_ck_n,
+    output wire [1:0]  O_psram_cs_n,
+    output wire [1:0]  O_psram_reset_n,
+    inout  wire [1:0]  IO_psram_rwds,
+    inout  wire [15:0] IO_psram_dq,
+
     input  wire        reset_n,
     input  wire        start,
     input  wire        irq_n,
@@ -25,6 +41,21 @@ module rv32top #(
     output wire        uartTx,
     output wire        trap
 );
+    // ---------------------------------------------------------------- 时钟
+    // 50MHz 晶振 -> 80MHz 系统时钟 + 80MHz 相移时钟（推 PSRAM CK）
+    wire       sysClk;
+    wire       psramClkP;
+    wire       pllLock;
+    wire [3:0] psramCkPhase;   // 来自 PSRAM 配置窗口，运行时可调
+
+    Gowin_rPLL sysPll (
+        .clkout  (sysClk),
+        .clkoutp (psramClkP),
+        .lock    (pllLock),
+        .clkin   (clock50MHz),
+        .psda    (psramCkPhase)
+    );
+
     // 复位按下只等待两级同步，尽快让系统停下；松开必须稳定满消抖时间。
     // POWERUP_PRESSED 让 FPGA 上电后先保持复位，再等待 reset_n 稳定为高。
     wire systemReset_n;
@@ -34,8 +65,8 @@ module rv32top #(
         .FAST_PRESS(1),
         .POWERUP_PRESSED(1)
     ) resetButton (
-        .clock50MHz(clock50MHz),
-        .reset_n(1'b1),
+        .clk(sysClk),
+        .reset_n(pllLock),          // PLL 未锁定就保持复位
         .button_n(reset_n),
         .debounced_n(systemReset_n),
         .pressPulse(unused_resetPressPulse)
@@ -48,7 +79,7 @@ module rv32top #(
     ButtonDebounce #(
         .FILTER_CYCLES(BUTTON_FILTER_CYCLES)
     ) startButton (
-        .clock50MHz(clock50MHz),
+        .clk(sysClk),
         .reset_n(systemReset_n),
         .button_n(start),
         .debounced_n(unused_startDebounced_n),
@@ -63,7 +94,7 @@ module rv32top #(
     ButtonDebounce #(
         .FILTER_CYCLES(BUTTON_FILTER_CYCLES)
     ) irqButton (
-        .clock50MHz(clock50MHz),
+        .clk(sysClk),
         .reset_n(systemReset_n),
         .button_n(irq_n),
         .debounced_n(unused_irqDebounced_n),
@@ -82,8 +113,10 @@ module rv32top #(
     wire rxFramingError;
     wire rxBusy;
 
-    UARTRX receiver (
-        .clock50MHz(clock50MHz),
+    UARTRX #(
+        .CLK_HZ(SYS_CLK_HZ)
+    ) receiver (
+        .clk(sysClk),
         .reset_n(systemReset_n),
         .uartRx(uartRx),
         .byteData(rxByteData),
@@ -102,7 +135,7 @@ module rv32top #(
     wire loaderWrite = systemReset_n && !programLoaded && !loadError &&
                        rxByteValid && (loadedBytes < 16'h4000);
 
-    always @(posedge clock50MHz) begin
+    always @(posedge sysClk) begin
         if (!systemReset_n) begin
             startPending <= 1'b0;
             programLoaded <= 1'b0;
@@ -181,7 +214,7 @@ module rv32top #(
         .PROGADDR_IRQ(32'h0000_0000),
         .STACKADDR(32'h0000_8000)
     ) cpu (
-        .clk(clock50MHz),
+        .clk(sysClk),
         .resetn(cpuReset_n),
         .trap(trap),
         .mem_valid(cpu_mem_valid),
@@ -237,11 +270,22 @@ module rv32top #(
     wire [3:0] mmio_wstrb;
     wire [31:0] mmio_rdata;
 
-    wire reserved_valid;
-    wire reserved_instr;
-    wire [31:0] reserved_addr;
-    wire [31:0] reserved_wdata;
-    wire [3:0] reserved_wstrb;
+    wire psram_valid;
+    wire psram_instr;
+    wire psram_ready;
+    wire [31:0] psram_addr;
+    wire [31:0] psram_wdata;
+    wire [3:0] psram_wstrb;
+    wire [31:0] psram_rdata;
+
+    wire psramcfg_valid;
+    wire psramcfg_instr;
+    wire psramcfg_ready;
+    wire [31:0] psramcfg_addr;
+    wire [31:0] psramcfg_wdata;
+    wire [3:0] psramcfg_wstrb;
+    wire [31:0] psramcfg_rdata;
+
     wire unmapped_valid;
 
     busManager router (
@@ -265,18 +309,21 @@ module rv32top #(
         .mmio_wdata(mmio_wdata), .mmio_wstrb(mmio_wstrb),
         .mmio_rdata(mmio_rdata),
 
-        .reserved_valid(reserved_valid),
-        .reserved_instr(reserved_instr),
-        .reserved_ready(1'b1),
-        .reserved_addr(reserved_addr),
-        .reserved_wdata(reserved_wdata),
-        .reserved_wstrb(reserved_wstrb),
-        .reserved_rdata(32'd0),
+        .psram_valid(psram_valid), .psram_instr(psram_instr),
+        .psram_ready(psram_ready), .psram_addr(psram_addr),
+        .psram_wdata(psram_wdata), .psram_wstrb(psram_wstrb),
+        .psram_rdata(psram_rdata),
+
+        .psramcfg_valid(psramcfg_valid), .psramcfg_instr(psramcfg_instr),
+        .psramcfg_ready(psramcfg_ready), .psramcfg_addr(psramcfg_addr),
+        .psramcfg_wdata(psramcfg_wdata), .psramcfg_wstrb(psramcfg_wstrb),
+        .psramcfg_rdata(psramcfg_rdata),
+
         .unmapped_valid(unmapped_valid)
     );
 
     uartProgramMemory programMemory (
-        .clk(clock50MHz), .reset_n(systemReset_n),
+        .clk(sysClk), .reset_n(systemReset_n),
         .loader_we(loaderWrite),
         .loader_addr(loadedBytes[13:0]),
         .loader_wdata(rxByteData),
@@ -285,29 +332,49 @@ module rv32top #(
     );
 
     rv32RegisterRam dataMemory (
-        .clk(clock50MHz), .reset_n(cpuReset_n),
+        .clk(sysClk), .reset_n(cpuReset_n),
         .mem_valid(sram_valid), .mem_ready(sram_ready),
         .mem_addr(sram_addr), .mem_wdata(sram_wdata),
         .mem_wstrb(sram_wstrb), .mem_rdata(sram_rdata)
     );
 
     wire uartIdle;
-    UARTTX_MMIO uartMmio (
-        .clock50MHz(clock50MHz), .reset_n(cpuReset_n),
+    UARTTX_MMIO #(
+        .CLK_HZ(SYS_CLK_HZ)
+    ) uartMmio (
+        .clk(sysClk), .reset_n(cpuReset_n),
         .mmio_valid(mmio_valid), .mmio_ready(mmio_ready),
         .mmio_addr(mmio_addr), .mmio_wdata(mmio_wdata),
         .mmio_wstrb(mmio_wstrb), .mmio_rdata(mmio_rdata),
         .uartTx(uartTx), .uartIdle(uartIdle)
     );
 
-    // 这些信号第一版暂时不用，保留名字方便仿真观察，也避免把 SPI Flash
-    // 或预留窗口误接进当前最小系统。
+    // ---------------------------------------------------------------------
+    // 内嵌 PSRAM
+    // ---------------------------------------------------------------------
+    psramController psram (
+        .clk(sysClk), .clk_p(psramClkP), .reset_n(cpuReset_n),
+
+        .mem_valid(psram_valid), .mem_ready(psram_ready),
+        .mem_addr(psram_addr), .mem_wdata(psram_wdata),
+        .mem_wstrb(psram_wstrb), .mem_rdata(psram_rdata),
+
+        .cfg_valid(psramcfg_valid), .cfg_ready(psramcfg_ready),
+        .cfg_addr(psramcfg_addr[11:0]), .cfg_wdata(psramcfg_wdata),
+        .cfg_wstrb(psramcfg_wstrb), .cfg_rdata(psramcfg_rdata),
+        .ckPhase(psramCkPhase),
+
+        .O_psram_ck(O_psram_ck), .O_psram_ck_n(O_psram_ck_n),
+        .O_psram_cs_n(O_psram_cs_n), .O_psram_reset_n(O_psram_reset_n),
+        .IO_psram_rwds(IO_psram_rwds), .IO_psram_dq(IO_psram_dq)
+    );
+
+    // 这些信号第一版暂时不用，保留名字方便仿真观察。
     wire unused_signals = &{1'b0, mem_la_read, mem_la_write, mem_la_addr,
                             mem_la_wdata, mem_la_wstrb, pcpi_valid, pcpi_insn,
                             pcpi_rs1, pcpi_rs2, eoi, trace_valid, trace_data,
                             flash_instr, flash_wdata, flash_wstrb, sram_instr,
-                            mmio_instr, reserved_valid, reserved_instr,
-                            reserved_addr, reserved_wdata, reserved_wstrb,
+                            mmio_instr, psram_instr, psramcfg_instr,
                             unmapped_valid, uartIdle,
                             unused_resetPressPulse,
                             unused_startDebounced_n,

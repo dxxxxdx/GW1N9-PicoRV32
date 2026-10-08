@@ -8,9 +8,12 @@ ENTRY(_start)
  * 0x0000_0000 - 0x0000_00ff: IRQ entry, padded (PROGADDR_IRQ, see vectors.S)
  * 0x0000_0100 - 0x0000_3fff: _start, .text / .rodata and the .data load image
  * 0x0000_4000 - 0x0000_7fff: data BSRAM
+ * 0x0200_0000 - 0x023f_ffff: PSRAM 4 MiB data window  (.psram)
+ * 0x0300_0000 - 0x0300_0fff: PSRAM config window    (__psram_cfg_base)
  *
  * There is no external SPI flash in the current system. Initialized data is
  * stored in the program image and must be copied to DATA_RAM by _start.
+ * The PSRAM section is NOLOAD: nothing is copied into it at reset.
  */
 
 __stack_size = 2K;
@@ -20,6 +23,8 @@ MEMORY
 {
     PROGRAM_RAM (rx)  : ORIGIN = 0x00000000, LENGTH = 16K
     DATA_RAM    (rw)  : ORIGIN = 0x00004000, LENGTH = 16K
+    PSRAM       (rw)  : ORIGIN = 0x02000000, LENGTH = 4M
+    PSRAM_CFG   (rw)  : ORIGIN = 0x03000000, LENGTH = 4K
 }
 
 SECTIONS
@@ -134,6 +139,31 @@ SECTIONS
         __stack_top = .;
     } > DATA_RAM
 
+    /*
+     * PSRAM 数据窗口，4 MiB。NOLOAD：不产生加载镜像，_start 也不会去初始化
+     * 它，放这里的变量必须由代码自己初始化。
+     *
+     *   __attribute__((section(".psram"))) uint32_t frame[1024];
+     *
+     * 也可以直接用 __psram_base 当基址手工寻址整个窗口。
+     */
+    .psram ORIGIN(PSRAM) (NOLOAD) :
+    {
+        . = ALIGN(4);
+        __psram_start = .;
+        *(.psram .psram.*)
+        . = ALIGN(4);
+        __psram_end = .;
+    } > PSRAM
+
+    /* 整个窗口的边界，给"把 PSRAM 当一整块内存用"的代码。 */
+    __psram_base  = ORIGIN(PSRAM);
+    __psram_limit = ORIGIN(PSRAM) + LENGTH(PSRAM);
+
+    /* PSRAM 配置窗口（rdLat / wrLat / STATUS）。 */
+    __psram_cfg_base  = ORIGIN(PSRAM_CFG);
+    __psram_cfg_limit = ORIGIN(PSRAM_CFG) + LENGTH(PSRAM_CFG);
+
     /DISCARD/ :
     {
         *(.comment)
@@ -153,6 +183,10 @@ SECTIONS
            "_start must be located at 0x00000100 (PROGADDR_RESET)")
     ASSERT(__static_end <= __stack_bottom,
            "DATA_RAM overflow: static data overlaps the stack")
+    ASSERT((__psram_start & 3) == 0,
+           ".psram must start 4-byte aligned")
+    ASSERT(__psram_end <= __psram_limit,
+           "PSRAM overflow: .psram does not fit in the 4 MiB window")
     ASSERT(__stack_top == ORIGIN(DATA_RAM) + LENGTH(DATA_RAM),
            "stack does not end at the top of DATA_RAM")
 }

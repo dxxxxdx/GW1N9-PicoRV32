@@ -1,0 +1,28 @@
+[
+ {
+  "InstFile" : "/home/dxx/git/GW1N9-PicoRV32/testpsram/src/testpsram.v",
+  "InstLine" : 16,
+  "InstName" : "testpsram",
+  "ModuleFile" : "/home/dxx/git/GW1N9-PicoRV32/testpsram/src/testpsram.v",
+  "ModuleLine" : 16,
+  "ModuleName" : "testpsram",
+  "SubInsts" : [
+   {
+    "InstFile" : "/home/dxx/git/GW1N9-PicoRV32/testpsram/src/testpsram.v",
+    "InstLine" : 33,
+    "InstName" : "u_pll",
+    "ModuleFile" : "/home/dxx/git/GW1N9-PicoRV32/testpsram/src/gowin_rpll.v",
+    "ModuleLine" : 18,
+    "ModuleName" : "Gowin_rPLL"
+   },
+   {
+    "InstFile" : "/home/dxx/git/GW1N9-PicoRV32/testpsram/src/testpsram.v",
+    "InstLine" : 86,
+    "InstName" : "u_phy",
+    "ModuleFile" : "/home/dxx/git/GW1N9-PicoRV32/testpsram/src/psram_phy.v",
+    "ModuleLine" : 24,
+    "ModuleName" : "psram_phy"
+   }
+  ]
+ }
+]

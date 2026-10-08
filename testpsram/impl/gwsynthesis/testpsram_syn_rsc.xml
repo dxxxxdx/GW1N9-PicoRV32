@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Module name="testpsram" Register="81" Alu="13" Lut="50" T_Register="129(81)" T_Alu="13(13)" T_Lut="122(50)">
+ <SubModule name="u_pll"/>
+ <SubModule name="u_phy" Register="48" Lut="72" T_Register="48(48)" T_Lut="72(72)"/>
+</Module>

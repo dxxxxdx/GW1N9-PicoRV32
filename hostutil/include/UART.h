@@ -19,4 +19,9 @@
 /* Poll the UART and send exactly len bytes. */
 void UART_String(const uint8_t *data, uint8_t len);
 
+/* 调试输出。UART_Hex32 打满 8 位十六进制（不带 0x 前缀）。 */
+void UART_CStr(const char *text);
+void UART_UInt(uint32_t value);
+void UART_Hex32(uint32_t value);
+
 #endif /* GW1NR9_RV32_UART_H */

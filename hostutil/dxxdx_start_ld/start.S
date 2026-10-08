@@ -11,6 +11,9 @@
     .equ UART_TX_ENABLE, 0x01000001
     .equ UART_TX_IDLE,   0x01000002
 
+/* PSRAM status register: bit0 = initDone. */
+    .equ PSRAM_STATUS,   0x03000004
+
 _start:
     /*
      * Touch the UART before using DATA_RAM.  Loading the string address is
@@ -63,10 +66,26 @@ _start:
     la      t1, __bss_end
 
 .Lclear_bss:
-    beq     t0, t1, .Lenter_main
+    beq     t0, t1, .Lwait_psram
     sw      zero, 0(t0)
     addi    t0, t0, 4
     j       .Lclear_bss
+
+    /*
+     * 等 PSRAM 控制器上电完成：cpuReset_n 放开后它要等 250us(tRPU 150us)
+     * 再写一次 CR0 才算初始化好。这期间读状态寄存器是安全的，碰数据窗口
+     * 只会把总线卡住——虽然结果一样，但在这里等掉，main 里的第一次访问
+     * 就不会看起来像死机。
+     *
+     * 实际上上面的欢迎串要发 19 个字节约 1.6ms，早就初始化完了，
+     * 这个循环正常是直接穿过去的，留着是防以后改短欢迎串。
+     */
+.Lwait_psram:
+    li      t0, PSRAM_STATUS
+.Lpsram_poll:
+    lw      t1, 0(t0)
+    andi    t1, t1, 1
+    beqz    t1, .Lpsram_poll
 
 .Lenter_main:
     li      a0, 0
