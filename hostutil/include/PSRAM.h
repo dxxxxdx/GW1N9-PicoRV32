@@ -38,7 +38,7 @@ extern uint8_t __psram_end[];
 #define PSRAM_SWAP_REG    (*(volatile uint32_t *)(PSRAM_CFG_BASE + 0x18u))
 #define PSRAM_PHYS_BYTES_REG (*(volatile uint32_t *)(PSRAM_CFG_BASE + 0x1cu))
 
-#define PSRAM_MAGIC_EXPECTED     0x50535253u  // "PSRS"
+#define PSRAM_MAGIC_EXPECTED     0x50534231u  // "PSB1": burst-port ABI v1
 #define PSRAM_STATUS_INIT_DONE   (1u << 0)
 #define PSRAM_STATUS_PHY_BUSY    (1u << 1)
 #define PSRAM_STATUS_DIE0_READY  (1u << 2)

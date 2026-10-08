@@ -9,7 +9,9 @@
 // logical back die; HDMI exclusively reaches the front die.  A frame-boundary
 // swap flips only the mapping, never copies memory contents.
 //
-// A 32-bit CPU access is split into one or two 16-bit switcher commands.  The
+// A 32-bit CPU access becomes one two-beat physical burst.  Each streaming beat
+// carries only a low 16-bit value; the bridge serializes/deserializes the two
+// halves while the PHY keeps CS asserted and sends CA only once.  The
 // CPU-to-PHY crossing uses a request/acknowledge toggle with bundled data.
 // Future GPU and HDMI ports are already present in the PHY clock domain.
 //------------------------------------------------------------------------------
@@ -36,22 +38,31 @@ module psramController #(
     input  wire [ 3:0] cfg_wstrb,
     output reg  [31:0] cfg_rdata,
 
-    // Future GPU port, synchronous to phy_clk.  GPU has priority over CPU for
-    // the back die when both are waiting at a command boundary.
-    input  wire        gpu_valid,
-    output wire        gpu_ready,
-    input  wire        gpu_wr,
-    input  wire [21:0] gpu_addr,
-    input  wire [ 1:0] gpu_mask,
-    input  wire [15:0] gpu_wdata,
-    output wire [15:0] gpu_rdata,
+    // Future GPU burst port, synchronous to phy_clk.  Length is expressed in
+    // 16-bit beats (1..64).  The current low 16-bit write beat advances on
+    // gpu_w_take; returned read beats cannot be back-pressured.
+    input  wire        gpu_cmd_valid,
+    output wire        gpu_cmd_ready,
+    input  wire        gpu_cmd_wr,
+    input  wire [21:0] gpu_cmd_addr,
+    input  wire [ 6:0] gpu_cmd_words,
+    input  wire [15:0] gpu_w_data,
+    input  wire [ 1:0] gpu_w_mask,
+    output wire        gpu_w_take,
+    output wire [15:0] gpu_r_data,
+    output wire        gpu_r_valid,
+    output wire        gpu_r_last,
     output wire        gpu_done,
 
-    // Future HDMI read port, synchronous to phy_clk and exclusive to front.
-    input  wire        hdmi_valid,
-    output wire        hdmi_ready,
-    input  wire [21:0] hdmi_addr,
-    output wire [15:0] hdmi_rdata,
+    // Future HDMI read-burst port, synchronous to phy_clk and exclusive to
+    // the front die.  The reader must reserve cmd_words FIFO entries first.
+    input  wire        hdmi_cmd_valid,
+    output wire        hdmi_cmd_ready,
+    input  wire [21:0] hdmi_cmd_addr,
+    input  wire [ 6:0] hdmi_cmd_words,
+    output wire [15:0] hdmi_r_data,
+    output wire        hdmi_r_valid,
+    output wire        hdmi_r_last,
     output wire        hdmi_done,
     input  wire        hdmi_frame_done,
     output wire        frame_swap_request,
@@ -69,12 +80,10 @@ module psramController #(
                      C_WAIT = 2'd1,
                      C_RESP = 2'd2;
 
-    localparam [2:0] P_WAIT_INIT  = 3'd0,
-                     P_IDLE       = 3'd1,
-                     P_LOW_ISSUE  = 3'd2,
-                     P_LOW_WAIT   = 3'd3,
-                     P_HIGH_ISSUE = 3'd4,
-                     P_HIGH_WAIT  = 3'd5;
+    localparam [2:0] P_WAIT_INIT = 3'd0,
+                     P_IDLE      = 3'd1,
+                     P_CMD       = 3'd2,
+                     P_WAIT      = 3'd3;
 
     // Phase 5 is the center selected from the measured common pass window 2..7.
     reg [3:0] ckPhaseR = 4'd5;
@@ -155,17 +164,24 @@ module psramController #(
     reg [2:0] phyState;
 
     reg        reqWritePhy;
-    reg [21:0] reqAddrPhy;
     reg [31:0] reqWdataPhy;
     reg [ 3:0] reqWstrbPhy;
 
     reg         cpuCmdValid;
     reg         cpuCmdWr;
     reg  [21:0] cpuCmdAddr;
-    reg  [ 1:0] cpuCmdMask;
-    reg  [15:0] cpuCmdWdata;
     wire        cpuCmdReady;
+    reg         cpuWriteBeat;
+    reg         cpuReadBeat;
+    wire [15:0] cpuCmdWdata = cpuWriteBeat ? reqWdataPhy[31:16] :
+                                                    reqWdataPhy[15:0];
+    wire [ 1:0] cpuCmdMask = !reqWritePhy ? 2'b11 :
+                                  cpuWriteBeat ? ~reqWstrbPhy[3:2] :
+                                                 ~reqWstrbPhy[1:0];
+    wire        cpuCmdWTake;
     wire [15:0] cpuCmdRdata;
+    wire        cpuCmdRvalid;
+    wire        cpuCmdRlast;
     wire        cpuCmdDone;
 
     wire phyInitDone0;
@@ -181,14 +197,13 @@ module psramController #(
             reqSeenPhy   <= 1'b0;
             phyState     <= P_WAIT_INIT;
             reqWritePhy  <= 1'b0;
-            reqAddrPhy   <= 22'd0;
             reqWdataPhy  <= 32'd0;
             reqWstrbPhy  <= 4'd0;
             cpuCmdValid  <= 1'b0;
             cpuCmdWr     <= 1'b0;
             cpuCmdAddr   <= 22'd0;
-            cpuCmdMask   <= 2'b11;
-            cpuCmdWdata  <= 16'd0;
+            cpuWriteBeat <= 1'b0;
+            cpuReadBeat  <= 1'b0;
             respDataPhy  <= 32'd0;
             ackTogglePhy <= 1'b0;
         end else begin
@@ -202,67 +217,38 @@ module psramController #(
                     if (reqSyncPhy != reqSeenPhy) begin
                         reqSeenPhy  <= reqSyncPhy;
                         reqWritePhy <= (reqWstrbCpu != 4'b0000);
-                        reqAddrPhy  <= {reqAddrCpu[21:2], 2'b00};
                         reqWdataPhy <= reqWdataCpu;
                         reqWstrbPhy <= reqWstrbCpu;
-
-                        if ((reqWstrbCpu != 4'b0000) &&
-                            (reqWstrbCpu[1:0] == 2'b00)) begin
-                            cpuCmdWr    <= 1'b1;
-                            cpuCmdAddr  <= {reqAddrCpu[21:2], 2'b00} + 22'd2;
-                            cpuCmdMask  <= ~reqWstrbCpu[3:2];
-                            cpuCmdWdata <= reqWdataCpu[31:16];
-                            cpuCmdValid <= 1'b1;
-                            phyState    <= P_HIGH_ISSUE;
-                        end else begin
-                            cpuCmdWr    <= (reqWstrbCpu != 4'b0000);
-                            cpuCmdAddr  <= {reqAddrCpu[21:2], 2'b00};
-                            cpuCmdMask  <= (reqWstrbCpu == 4'b0000) ?
-                                           2'b11 : ~reqWstrbCpu[1:0];
-                            cpuCmdWdata <= reqWdataCpu[15:0];
-                            cpuCmdValid <= 1'b1;
-                            phyState    <= P_LOW_ISSUE;
-                        end
+                        cpuCmdWr     <= (reqWstrbCpu != 4'b0000);
+                        cpuCmdAddr   <= {reqAddrCpu[21:2], 2'b00};
+                        cpuCmdValid  <= 1'b1;
+                        cpuWriteBeat <= 1'b0;
+                        cpuReadBeat  <= 1'b0;
+                        respDataPhy  <= 32'd0;
+                        phyState     <= P_CMD;
                     end
                 end
 
-                P_LOW_ISSUE: begin
+                P_CMD: begin
                     if (cpuCmdReady) begin
                         cpuCmdValid <= 1'b0;
-                        phyState <= P_LOW_WAIT;
+                        phyState <= P_WAIT;
                     end
                 end
 
-                P_LOW_WAIT: begin
-                    if (cpuCmdDone) begin
-                        if (!reqWritePhy)
+                P_WAIT: begin
+                    if (cpuCmdWTake)
+                        cpuWriteBeat <= 1'b1;
+
+                    if (cpuCmdRvalid) begin
+                        if (!cpuReadBeat)
                             respDataPhy[15:0] <= cpuCmdRdata;
-
-                        if (reqWritePhy && reqWstrbPhy[3:2] == 2'b00) begin
-                            ackTogglePhy <= ~ackTogglePhy;
-                            phyState <= P_IDLE;
-                        end else begin
-                            cpuCmdWr    <= reqWritePhy;
-                            cpuCmdAddr  <= reqAddrPhy + 22'd2;
-                            cpuCmdMask  <= reqWritePhy ? ~reqWstrbPhy[3:2] : 2'b11;
-                            cpuCmdWdata <= reqWdataPhy[31:16];
-                            cpuCmdValid <= 1'b1;
-                            phyState    <= P_HIGH_ISSUE;
-                        end
-                    end
-                end
-
-                P_HIGH_ISSUE: begin
-                    if (cpuCmdReady) begin
-                        cpuCmdValid <= 1'b0;
-                        phyState <= P_HIGH_WAIT;
-                    end
-                end
-
-                P_HIGH_WAIT: begin
-                    if (cpuCmdDone) begin
-                        if (!reqWritePhy)
+                        else
                             respDataPhy[31:16] <= cpuCmdRdata;
+                        cpuReadBeat <= 1'b1;
+                    end
+
+                    if (cpuCmdDone) begin
                         ackTogglePhy <= ~ackTogglePhy;
                         phyState <= P_IDLE;
                     end
@@ -302,18 +288,22 @@ module psramController #(
     wire frameDonePulsePhy = hdmi_frame_done || softFramePulsePhy;
 
     // ------------------------------------------------------------- switcher/PHY
-    wire phyStart0, phyWr0;
+    wire phyCmdValid0, phyCmdReady0, phyWr0;
     wire [21:0] phyAddr0;
+    wire [6:0] phyWords0;
     wire [1:0] phyMask0;
     wire [15:0] phyDin0;
     wire [15:0] phyDout0;
+    wire phyWTake0, phyRvalid0, phyRlast0;
     wire phyBusy0, phyDone0;
 
-    wire phyStart1, phyWr1;
+    wire phyCmdValid1, phyCmdReady1, phyWr1;
     wire [21:0] phyAddr1;
+    wire [6:0] phyWords1;
     wire [1:0] phyMask1;
     wire [15:0] phyDin1;
     wire [15:0] phyDout1;
+    wire phyWTake1, phyRvalid1, phyRlast1;
     wire phyBusy1, phyDone1;
 
     wire switchBusy;
@@ -324,22 +314,25 @@ module psramController #(
     wire [15:0] switchSwapCount;
     wire switchFrontDie;
     wire switchBackDie;
-    wire cpuSequenceActive = (phyState != P_IDLE) &&
-                             (phyState != P_WAIT_INIT);
 
     psramSwitcher switcher (
         .clk(phy_clk), .reset_n(phyReset_n),
-        .cpu_valid(cpuCmdValid), .cpu_ready(cpuCmdReady),
-        .cpu_sequence_active(cpuSequenceActive),
-        .cpu_wr(cpuCmdWr), .cpu_addr(cpuCmdAddr),
-        .cpu_mask(cpuCmdMask), .cpu_wdata(cpuCmdWdata),
-        .cpu_rdata(cpuCmdRdata), .cpu_done(cpuCmdDone),
-        .gpu_valid(gpu_valid), .gpu_ready(gpu_ready), .gpu_wr(gpu_wr),
-        .gpu_addr(gpu_addr), .gpu_mask(gpu_mask), .gpu_wdata(gpu_wdata),
-        .gpu_rdata(gpu_rdata), .gpu_done(gpu_done),
-        .hdmi_valid(hdmi_valid), .hdmi_ready(hdmi_ready),
-        .hdmi_addr(hdmi_addr), .hdmi_rdata(hdmi_rdata),
-        .hdmi_done(hdmi_done),
+        .cpu_cmd_valid(cpuCmdValid), .cpu_cmd_ready(cpuCmdReady),
+        .cpu_cmd_wr(cpuCmdWr), .cpu_cmd_addr(cpuCmdAddr),
+        .cpu_cmd_words(7'd2), .cpu_w_data(cpuCmdWdata),
+        .cpu_w_mask(cpuCmdMask), .cpu_w_take(cpuCmdWTake),
+        .cpu_r_data(cpuCmdRdata), .cpu_r_valid(cpuCmdRvalid),
+        .cpu_r_last(cpuCmdRlast), .cpu_done(cpuCmdDone),
+        .gpu_cmd_valid(gpu_cmd_valid), .gpu_cmd_ready(gpu_cmd_ready),
+        .gpu_cmd_wr(gpu_cmd_wr), .gpu_cmd_addr(gpu_cmd_addr),
+        .gpu_cmd_words(gpu_cmd_words), .gpu_w_data(gpu_w_data),
+        .gpu_w_mask(gpu_w_mask), .gpu_w_take(gpu_w_take),
+        .gpu_r_data(gpu_r_data), .gpu_r_valid(gpu_r_valid),
+        .gpu_r_last(gpu_r_last), .gpu_done(gpu_done),
+        .hdmi_cmd_valid(hdmi_cmd_valid), .hdmi_cmd_ready(hdmi_cmd_ready),
+        .hdmi_cmd_addr(hdmi_cmd_addr), .hdmi_cmd_words(hdmi_cmd_words),
+        .hdmi_r_data(hdmi_r_data), .hdmi_r_valid(hdmi_r_valid),
+        .hdmi_r_last(hdmi_r_last), .hdmi_done(hdmi_done),
         .swap_request_pulse(swapReqPulsePhy),
         .frame_done_pulse(frameDonePulsePhy),
         .swap_request_hdmi(frame_swap_request),
@@ -349,13 +342,19 @@ module psramController #(
         .front_die(switchFrontDie), .back_die(switchBackDie),
         .any_busy(switchBusy), .gpu_active(switchGpuActive),
         .hdmi_active(switchHdmiActive),
-        .phy0_start(phyStart0), .phy0_wr(phyWr0), .phy0_addr(phyAddr0),
-        .phy0_mask(phyMask0), .phy0_wdata(phyDin0),
-        .phy0_rdata(phyDout0), .phy0_busy(phyBusy0),
+        .phy0_cmd_valid(phyCmdValid0), .phy0_cmd_ready(phyCmdReady0),
+        .phy0_cmd_wr(phyWr0), .phy0_cmd_addr(phyAddr0),
+        .phy0_cmd_words(phyWords0), .phy0_w_data(phyDin0),
+        .phy0_w_mask(phyMask0), .phy0_w_take(phyWTake0),
+        .phy0_r_data(phyDout0), .phy0_r_valid(phyRvalid0),
+        .phy0_r_last(phyRlast0), .phy0_busy(phyBusy0),
         .phy0_done(phyDone0), .phy0_init_done(phyInitDone0),
-        .phy1_start(phyStart1), .phy1_wr(phyWr1), .phy1_addr(phyAddr1),
-        .phy1_mask(phyMask1), .phy1_wdata(phyDin1),
-        .phy1_rdata(phyDout1), .phy1_busy(phyBusy1),
+        .phy1_cmd_valid(phyCmdValid1), .phy1_cmd_ready(phyCmdReady1),
+        .phy1_cmd_wr(phyWr1), .phy1_cmd_addr(phyAddr1),
+        .phy1_cmd_words(phyWords1), .phy1_w_data(phyDin1),
+        .phy1_w_mask(phyMask1), .phy1_w_take(phyWTake1),
+        .phy1_r_data(phyDout1), .phy1_r_valid(phyRvalid1),
+        .phy1_r_last(phyRlast1), .phy1_busy(phyBusy1),
         .phy1_done(phyDone1), .phy1_init_done(phyInitDone1)
     );
 
@@ -363,8 +362,10 @@ module psramController #(
         .FREQ_HZ(PHY_FREQ_HZ), .LATENCY(LATENCY), .DIE_INDEX(0)
     ) phy0 (
         .clk(phy_clk), .clk_p(clk_p), .reset_n(phyReset_n),
-        .start(phyStart0), .wr(phyWr0), .byteAddr(phyAddr0),
-        .wmask(phyMask0), .dIn(phyDin0), .dOut(phyDout0),
+        .cmd_valid(phyCmdValid0), .cmd_ready(phyCmdReady0),
+        .cmd_write(phyWr0), .cmd_addr(phyAddr0), .cmd_words(phyWords0),
+        .w_data(phyDin0), .w_mask(phyMask0), .w_take(phyWTake0),
+        .r_data(phyDout0), .r_valid(phyRvalid0), .r_last(phyRlast0),
         .busy(phyBusy0), .done(phyDone0), .initDone(phyInitDone0),
         .O_psram_ck(O_psram_ck[0]), .O_psram_ck_n(O_psram_ck_n[0]),
         .O_psram_cs_n(O_psram_cs_n[0]),
@@ -376,8 +377,10 @@ module psramController #(
         .FREQ_HZ(PHY_FREQ_HZ), .LATENCY(LATENCY), .DIE_INDEX(1)
     ) phy1 (
         .clk(phy_clk), .clk_p(clk_p), .reset_n(phyReset_n),
-        .start(phyStart1), .wr(phyWr1), .byteAddr(phyAddr1),
-        .wmask(phyMask1), .dIn(phyDin1), .dOut(phyDout1),
+        .cmd_valid(phyCmdValid1), .cmd_ready(phyCmdReady1),
+        .cmd_write(phyWr1), .cmd_addr(phyAddr1), .cmd_words(phyWords1),
+        .w_data(phyDin1), .w_mask(phyMask1), .w_take(phyWTake1),
+        .r_data(phyDout1), .r_valid(phyRvalid1), .r_last(phyRlast1),
         .busy(phyBusy1), .done(phyDone1), .initDone(phyInitDone1),
         .O_psram_ck(O_psram_ck[1]), .O_psram_ck_n(O_psram_ck_n[1]),
         .O_psram_cs_n(O_psram_cs_n[1]),
@@ -496,7 +499,7 @@ module psramController #(
                                init1SyncCpu, init0SyncCpu,
                                busySyncCpu, initDoneCpu};
             4'd2: cfg_rdata = {28'd0, ckPhaseR};
-            4'd3: cfg_rdata = 32'h5053_5253; // "PSRS": PSRAM switcher
+            4'd3: cfg_rdata = 32'h5053_4231; // "PSB1": burst-port ABI v1
             4'd4: cfg_rdata = {16'd0, ckpCntSync};
             4'd5: cfg_rdata = 32'h0040_0000; // CPU-visible logical back bytes
             4'd6: cfg_rdata = {swapCountCpu, 12'd0, pendingSyncCpu,

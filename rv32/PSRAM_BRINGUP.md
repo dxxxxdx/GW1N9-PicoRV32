@@ -32,20 +32,30 @@ A swap changes only these two ownership bits.  It does not copy memory.
 - CR0: `0x9FEF`, latency 3, fixed 2x latency, 35-ohm drive
 - power-up: each PHY waits 160 us and configures its own die
 
-Each CPU 32-bit load/store is split into one or two 16-bit commands.  The
-switcher includes a CPU sequence lock, so a frame boundary cannot move the
-second halfword of a 32-bit access to the other die.
+Each CPU 32-bit load/store becomes one two-beat physical burst: CA is sent
+once, then the low and high halfwords travel as two consecutive 16-bit beats.
+The streaming PHY port only ever carries the current value in `w_data[15:0]`
+or `r_data[15:0]`; the CPU bridge does the 32-bit split/join.  A frame boundary
+cannot move the second beat to the other die because the switcher locks the
+owner and physical die for the entire burst.
 
 ## Logical clients
 
-`psramSwitcher` has three clients, all currently expressed as single-word
-16-bit command ports in the 80 MHz domain:
+`psramSwitcher` has three clients, all expressed as burst ports in the 80 MHz
+domain.  One accepted command carries 1..64 consecutive 16-bit beats (2..128
+bytes):
 
 - HDMI exclusively accesses front;
 - GPU and CPU share back;
 - GPU has priority when GPU and CPU become valid at the same command boundary;
 - an already accepted CPU transaction is never pre-empted;
 - HDMI and the selected CPU/GPU client may access opposite dies concurrently.
+
+The write source holds its current low-16-bit beat until `*_w_take`, then
+advances on that same clock edge.  Reads return `*_r_valid` and `*_r_last`
+without backpressure, so an HDMI reader must reserve enough line-FIFO space
+before issuing its command.  `*_done` releases ownership after the physical
+recovery interval.
 
 The top level ties the future GPU and HDMI ports inactive for now.  CPU-only
 bring-up therefore exercises back through the normal PicoRV32 memory window.
@@ -69,7 +79,7 @@ The configuration window remains at `0x0300_0000`:
 | `0x00` | R | PHY frequency, `80_000_000` |
 | `0x04` | R | init/busy/die-ready/swap/front/back/GPU/HDMI status |
 | `0x08` | R/W | rPLL phase tap, reset value 5 |
-| `0x0c` | R | version `0x50535253` (`PSRS`) |
+| `0x0c` | R | version `0x50534231` (`PSB1`, burst-port ABI v1) |
 | `0x10` | R | phase-clock activity counter |
 | `0x14` | R | CPU-visible logical bytes, `0x0040_0000` |
 | `0x18` | R/W | swap status/control |
@@ -108,7 +118,10 @@ frame-boundary swap first.
 
 ## HDMI follow-up
 
-The placeholder HDMI word port is not fast enough for 720p60.  The next stage
-will add a burst reader and asynchronous line FIFO above the front port.  The
-GPU placeholder will similarly become a burst writer on back; its existing
-priority over the CPU is already enforced at the switcher boundary.
+The physical and switcher ports now support 128-byte bursts.  The next stage
+adds a BSRAM-backed asynchronous line FIFO above the HDMI front port and feeds
+these bursts only when at least the requested number of FIFO entries are free.
+The GPU placeholder uses the same burst shape on back; its priority over the
+CPU is already enforced at the switcher boundary.  The PHY itself intentionally
+contains no 128-byte buffer, so HDMI and GPU may each use a dedicated BSRAM
+without duplicating storage in every PHY.

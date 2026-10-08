@@ -126,6 +126,12 @@ PSRAM 两个物理 die 各为 4 MiB。HDMI 端独占逻辑前台 die；CPU 与�
 switcher 才原子翻转 front/back 映射。没有 HDMI 时可同时写 bit 1 注入软件
 帧完成脉冲做上板测试；详细寄存器定义见 `hostutil/include/PSRAM.h`。
 
+PHY、switcher 与预留 GPU/HDMI 端口现在统一使用 1..64 个 16-bit beat 的
+突发接口（最大 128 字节）。CPU 的一次 `lw/sw` 只发送一次 CA，随后用两个
+连续的低 16 位 beat 完成；32 位拆分和拼接留在 CPU bridge 内，软件看到的
+访问语义不变。读突发启动后不能反压，因此后续 HDMI 读取器必须先在 BSRAM
+行缓冲中预留完整突发的空间。
+
 ## UART TX MMIO
 
 三个寄存器位于同一个 32 位总线字的不同字节通道：

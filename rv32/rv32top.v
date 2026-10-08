@@ -361,10 +361,15 @@ module rv32top #(
     // GPU 和 HDMI 数据端口先保留在控制器边界。当前版本只让软核访问逻辑
     // back die；后续模块接入时无需再次改动 PHY 或物理 die 映射。
     wire gpuPsramReady;
+    wire gpuPsramWtake;
     wire [15:0] gpuPsramRdata;
+    wire gpuPsramRvalid;
+    wire gpuPsramRlast;
     wire gpuPsramDone;
     wire hdmiPsramReady;
     wire [15:0] hdmiPsramRdata;
+    wire hdmiPsramRvalid;
+    wire hdmiPsramRlast;
     wire hdmiPsramDone;
     wire frameSwapRequest;
 
@@ -383,13 +388,18 @@ module rv32top #(
         .cfg_addr(psramcfg_addr[11:0]), .cfg_wdata(psramcfg_wdata),
         .cfg_wstrb(psramcfg_wstrb), .cfg_rdata(psramcfg_rdata),
 
-        .gpu_valid(1'b0), .gpu_ready(gpuPsramReady), .gpu_wr(1'b0),
-        .gpu_addr(22'd0), .gpu_mask(2'b11), .gpu_wdata(16'd0),
-        .gpu_rdata(gpuPsramRdata), .gpu_done(gpuPsramDone),
+        .gpu_cmd_valid(1'b0), .gpu_cmd_ready(gpuPsramReady),
+        .gpu_cmd_wr(1'b0), .gpu_cmd_addr(22'd0), .gpu_cmd_words(7'd1),
+        .gpu_w_data(16'd0), .gpu_w_mask(2'b11),
+        .gpu_w_take(gpuPsramWtake), .gpu_r_data(gpuPsramRdata),
+        .gpu_r_valid(gpuPsramRvalid), .gpu_r_last(gpuPsramRlast),
+        .gpu_done(gpuPsramDone),
 
-        .hdmi_valid(1'b0), .hdmi_ready(hdmiPsramReady),
-        .hdmi_addr(22'd0), .hdmi_rdata(hdmiPsramRdata),
-        .hdmi_done(hdmiPsramDone), .hdmi_frame_done(1'b0),
+        .hdmi_cmd_valid(1'b0), .hdmi_cmd_ready(hdmiPsramReady),
+        .hdmi_cmd_addr(22'd0), .hdmi_cmd_words(7'd1),
+        .hdmi_r_data(hdmiPsramRdata), .hdmi_r_valid(hdmiPsramRvalid),
+        .hdmi_r_last(hdmiPsramRlast), .hdmi_done(hdmiPsramDone),
+        .hdmi_frame_done(1'b0),
         .frame_swap_request(frameSwapRequest),
 
         .ckPhase(psramCkPhase),
@@ -409,8 +419,10 @@ module rv32top #(
                             unused_resetPressPulse,
                             unused_startDebounced_n,
                             unused_irqDebounced_n, gpuPsramReady,
-                            gpuPsramRdata, gpuPsramDone, hdmiPsramReady,
-                            hdmiPsramRdata, hdmiPsramDone,
+                            gpuPsramWtake, gpuPsramRdata, gpuPsramRvalid,
+                            gpuPsramRlast, gpuPsramDone, hdmiPsramReady,
+                            hdmiPsramRdata, hdmiPsramRvalid, hdmiPsramRlast,
+                            hdmiPsramDone,
                             frameSwapRequest};
 endmodule
 

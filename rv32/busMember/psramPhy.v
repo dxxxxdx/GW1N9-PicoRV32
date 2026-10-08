@@ -11,10 +11,15 @@
 // (zf3/psram-tang-nano-9k).  The QN88 device exposes two independent x8 PSRAM
 // dies; the wrapper creates one instance of this PHY for each 4 MiB die.
 //
-// Each transaction transfers one 16-bit word.  CR0 selects fixed 2x initial
-// latency so refresh collisions cannot make the write launch decision depend
-// on a single RWDS sample.  Reads still wait for the RWDS data strobe instead
-// of sampling after a guessed fixed delay.
+// One command transfers 1..64 consecutive 16-bit words (2..128 bytes).  The
+// client presents the current write beat continuously and advances it whenever
+// w_take pulses.  Read beats are reported by r_valid; the physical stream
+// cannot be back-pressured after a command has started, so the client must
+// reserve enough FIFO space before issuing a read.
+//
+// CR0 selects fixed 2x initial latency so refresh collisions cannot make the
+// write launch decision depend on a single RWDS sample.  Reads still wait for
+// the RWDS data strobe instead of sampling after a guessed fixed delay.
 //------------------------------------------------------------------------------
 module psramPhy #(
     parameter integer FREQ_HZ = 80_000_000,
@@ -25,12 +30,19 @@ module psramPhy #(
     input  wire        clk_p,
     input  wire        reset_n,
 
-    input  wire        start,
-    input  wire        wr,
-    input  wire [21:0] byteAddr,
-    input  wire [ 1:0] wmask,       // bit 1/0 masks high/low byte; 1 = no write
-    input  wire [15:0] dIn,
-    output reg  [15:0] dOut,
+    input  wire        cmd_valid,
+    output wire        cmd_ready,
+    input  wire        cmd_write,
+    input  wire [21:0] cmd_addr,
+    input  wire [ 6:0] cmd_words,   // number of 16-bit beats, 1..64
+
+    input  wire [15:0] w_data,
+    input  wire [ 1:0] w_mask,      // bit 1/0 masks high/low byte; 1 = no write
+    output wire        w_take,      // advance w_data/w_mask for the next beat
+
+    output reg  [15:0] r_data,
+    output reg         r_valid,
+    output reg         r_last,
     output wire        busy,
     output reg         done,
     output reg         initDone,
@@ -67,8 +79,8 @@ module psramPhy #(
     reg [INIT_W-1:0] initCnt;
     reg [23:0] cyclesSr;
     reg [63:0] dqSr;
-    reg [15:0] writeData;
-    reg [1:0]  writeMask;
+    reg [6:0]  beatsLeft;
+    reg        writeDataPhase;
     reg        dqOen;
     reg        rwdsOen;
     reg        rwdsOutRis;
@@ -77,6 +89,7 @@ module psramPhy #(
     reg        ckEnable;
     reg        ckEnableP;
     reg        waitForReadData;
+    reg        readDataStarted;
     reg [2:0]  recoveryCnt;
 
     wire [7:0] dqOutRis = dqSr[63:56];
@@ -87,6 +100,10 @@ module psramPhy #(
     wire       rwdsInFal;
 
     assign busy = (state != S_IDLE);
+    assign cmd_ready = initDone && (state == S_IDLE);
+    wire writeBeatNow = state == S_WRITE &&
+                        (cyclesSr[2 + LATENCY*2] || writeDataPhase);
+    assign w_take = writeBeatNow;
 
     // Each instance owns one x8 die.  The wrapper instantiates both channels.
     assign O_psram_ck_n    = 1'b0; // PSRAM powers up in single-ended CK mode
@@ -94,6 +111,8 @@ module psramPhy #(
 
     always @(posedge clk) begin
         done      <= 1'b0;
+        r_valid   <= 1'b0;
+        r_last    <= 1'b0;
         cyclesSr  <= {cyclesSr[22:0], 1'b0};
         dqSr      <= {dqSr[47:0], 16'b0};
         ckEnableP <= ckEnable;
@@ -103,9 +122,11 @@ module psramPhy #(
             initCnt            <= {INIT_W{1'b0}};
             cyclesSr           <= 24'd0;
             dqSr               <= 64'd0;
-            writeData          <= 16'd0;
-            writeMask          <= 2'b11;
-            dOut               <= 16'd0;
+            beatsLeft          <= 7'd0;
+            writeDataPhase     <= 1'b0;
+            r_data             <= 16'd0;
+            r_valid            <= 1'b0;
+            r_last             <= 1'b0;
             initDone           <= 1'b0;
             done               <= 1'b0;
             dqOen              <= 1'b1;
@@ -116,6 +137,7 @@ module psramPhy #(
             ckEnable           <= 1'b0;
             ckEnableP          <= 1'b0;
             waitForReadData    <= 1'b0;
+            readDataStarted    <= 1'b0;
             recoveryCnt        <= 3'd0;
         end else begin
             case (state)
@@ -160,19 +182,22 @@ module psramPhy #(
                     ckEnable <= 1'b0;
                     dqOen    <= 1'b1;
                     rwdsOen  <= 1'b1;
-                    if (start) begin
+                    if (cmd_valid && cmd_ready) begin
                         // 48-bit HyperBus CA followed by padding for the shifter.
-                        dqSr <= {~wr, 13'b010_0000_0000_00,
-                                 byteAddr[21:4], 13'b0, byteAddr[3:1],
+                        dqSr <= {~cmd_write, 13'b010_0000_0000_00,
+                                 cmd_addr[21:4], 13'b0, cmd_addr[3:1],
                                  16'b0};
-                        writeData          <= dIn;
-                        writeMask          <= wmask;
+                        beatsLeft          <= cmd_words == 7'd0 ? 7'd1 :
+                                              cmd_words > 7'd64 ? 7'd64 :
+                                              cmd_words;
+                        writeDataPhase     <= 1'b0;
                         ramCsN             <= 1'b0;
                         ckEnable           <= 1'b1;
                         dqOen              <= 1'b0;
                         waitForReadData    <= 1'b0;
+                        readDataStarted    <= 1'b0;
                         cyclesSr           <= 24'b10;
-                        state              <= wr ? S_WRITE : S_READ;
+                        state              <= cmd_write ? S_WRITE : S_READ;
                     end
                 end
 
@@ -187,20 +212,29 @@ module psramPhy #(
                         waitForReadData <= 1'b1;
 
                     if (waitForReadData && (rwdsInRis ^ rwdsInFal)) begin
-                        dOut     <= {dqInRis, dqInFal};
-                        ramCsN   <= 1'b1;
-                        ckEnable <= 1'b0;
-                        state    <= S_RECOVERY;
-                        recoveryCnt <= RECOVERY_WAIT;
-                    end else if (cyclesSr[23]) begin
+                        r_data  <= {dqInRis, dqInFal};
+                        r_valid <= 1'b1;
+                        r_last  <= beatsLeft == 7'd1;
+                        readDataStarted <= 1'b1;
+                        if (beatsLeft == 7'd1) begin
+                            ramCsN      <= 1'b1;
+                            ckEnable    <= 1'b0;
+                            state       <= S_RECOVERY;
+                            recoveryCnt <= RECOVERY_WAIT;
+                        end else begin
+                            beatsLeft <= beatsLeft - 7'd1;
+                        end
+                    end else if (!readDataStarted && cyclesSr[23]) begin
                         // A deliberately bad training phase can miss every
                         // RWDS edge.  Complete with a poison value instead of
                         // deadlocking the CPU; legal 2x latency finishes many
                         // clocks before this guard fires.
-                        dOut     <= 16'hdead;
-                        ramCsN   <= 1'b1;
-                        ckEnable <= 1'b0;
-                        state    <= S_RECOVERY;
+                        r_data      <= 16'hdead;
+                        r_valid     <= 1'b1;
+                        r_last      <= 1'b1;
+                        ramCsN      <= 1'b1;
+                        ckEnable    <= 1'b0;
+                        state       <= S_RECOVERY;
                         recoveryCnt <= RECOVERY_WAIT;
                     end
                 end
@@ -209,13 +243,19 @@ module psramPhy #(
                     // CR0 fixed-latency mode always uses 2x tACC.  This avoids
                     // a metastability-sensitive RWDS decision during CA and
                     // gives deterministic scheduling for the future DMA path.
-                    if (cyclesSr[2 + LATENCY*2]) begin
+                    if (writeBeatNow) begin
                         rwdsOen     <= 1'b0;
-                        rwdsOutRis  <= writeMask[1];
-                        rwdsOutFal  <= writeMask[0];
-                        dqSr[63:48] <= writeData;
-                        state       <= S_RECOVERY;
-                        recoveryCnt <= RECOVERY_WAIT;
+                        rwdsOutRis  <= w_mask[1];
+                        rwdsOutFal  <= w_mask[0];
+                        dqSr[63:48] <= w_data;
+                        writeDataPhase <= 1'b1;
+                        if (beatsLeft == 7'd1) begin
+                            state          <= S_RECOVERY;
+                            recoveryCnt    <= RECOVERY_WAIT;
+                            writeDataPhase <= 1'b0;
+                        end else begin
+                            beatsLeft <= beatsLeft - 7'd1;
+                        end
                     end
                 end
 
@@ -241,8 +281,8 @@ module psramPhy #(
         end
     end
 
-    // IOB DDR primitives. CK is phase shifted by 90 degrees; all other
-    // outputs and all inputs use the fabric clock exactly as the reference.
+    // IOB DDR primitives. CK uses the independently phase-adjusted clk_p;
+    // all other outputs and all inputs use the fabric PHY clock.
     wire csTbuf;
     ODDR oddrCs (
         .CLK(clk), .D0(ramCsN), .D1(ramCsN), .TX(1'b0), .Q0(csTbuf)
