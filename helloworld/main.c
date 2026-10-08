@@ -2,7 +2,6 @@
 #include "UART.h"
 #include "IRQ.h"
 
-#define TRAIN_WORDS_PER_DIE (32u * 1024u) // 128 KiB per die and pattern
 #define SWAP_TIMEOUT         1000000u
 #define SWAP_STRESS_WORDS    (16u * 1024u) // 64 KiB checked after every swap
 #define SWAP_STRESS_ROUNDS   256u
@@ -21,12 +20,6 @@ static void print_result(const char *name, uint32_t got, uint32_t want)
     UART_CStr(" want=0x");
     UART_Hex32(want);
     UART_CStr(got == want ? "  OK\r\n" : "  FAIL\r\n");
-}
-
-static void phase_settle(void)
-{
-    for (volatile uint32_t i = 0u; i < 512u; ++i)
-        __asm__ volatile ("nop");
 }
 
 static int swap_back_die(void)
@@ -64,142 +57,6 @@ static int select_back_die(uint32_t die)
     if (!swap_back_die())
         return 0;
     return PSRAM_GetBackDie() == (die & 1u);
-}
-
-static uint32_t training_pattern(uint32_t index, uint32_t seed)
-{
-    uint32_t x = index ^ (index << 16) ^ (index << 7) ^ (index >> 3);
-    return seed ^ x;
-}
-
-static uint32_t probeFailure;
-
-static uint32_t probe_visible_die(uint32_t seed)
-{
-    for (uint32_t i = 0u; i < TRAIN_WORDS_PER_DIE; ++i)
-        PSRAM_U32[i] = training_pattern(i, seed);
-
-    for (uint32_t i = 0u; i < TRAIN_WORDS_PER_DIE; ++i) {
-        if (PSRAM_U32[i] != training_pattern(i, seed))
-            return i;
-    }
-    return TRAIN_WORDS_PER_DIE;
-}
-
-static int probe_phase(uint32_t phase)
-{
-    uint32_t bad;
-
-    probeFailure = 0u;
-    PSRAM_SetPhase(phase);
-    phase_settle();
-    if (PSRAM_PHASE_REG != phase) {
-        probeFailure = 0x10000000u | PSRAM_PHASE_REG;
-        return 0;
-    }
-
-    if (!select_back_die(0u)) {
-        probeFailure = 0x50000000u;
-        return 0;
-    }
-    bad = probe_visible_die(0xa55a5aa5u);
-    if (bad != TRAIN_WORDS_PER_DIE) {
-        probeFailure = 0x01000000u | bad;
-        return 0;
-    }
-
-    if (!select_back_die(1u)) {
-        probeFailure = 0x50000001u;
-        return 0;
-    }
-    bad = probe_visible_die(0x5aa5a55au);
-    if (bad != TRAIN_WORDS_PER_DIE) {
-        probeFailure = 0x02000000u | bad;
-        return 0;
-    }
-
-    if (!select_back_die(0u)) {
-        probeFailure = 0x50000000u;
-        return 0;
-    }
-    bad = probe_visible_die(0x5aa5a55au);
-    if (bad != TRAIN_WORDS_PER_DIE) {
-        probeFailure = 0x03000000u | bad;
-        return 0;
-    }
-
-    if (!select_back_die(1u)) {
-        probeFailure = 0x50000001u;
-        return 0;
-    }
-    bad = probe_visible_die(0xa55a5aa5u);
-    if (bad != TRAIN_WORDS_PER_DIE) {
-        probeFailure = 0x04000000u | bad;
-        return 0;
-    }
-
-    if (!select_back_die(0u)) {
-        probeFailure = 0x50000000u;
-        return 0;
-    }
-    return 1;
-}
-
-static uint32_t choose_window_center(uint32_t passMask)
-{
-    uint32_t bestLength = 0u;
-    uint32_t bestEnd = 0u;
-    uint32_t length = 0u;
-
-    for (uint32_t i = 0u; i < 32u; ++i) {
-        if ((passMask & (1u << (i & 15u))) != 0u) {
-            if (length < 16u)
-                ++length;
-            if (length > bestLength) {
-                bestLength = length;
-                bestEnd = i;
-            }
-        } else {
-            length = 0u;
-        }
-    }
-
-    if (bestLength == 0u)
-        return 5u;
-    return (bestEnd + 1u - bestLength + bestLength / 2u) & 15u;
-}
-
-static uint32_t train_phase(void)
-{
-    uint32_t passMask = 0u;
-
-    UART_CStr("phase training through logical back window (two dies):\r\n");
-    for (uint32_t phase = 0u; phase < 16u; ++phase) {
-        int pass = probe_phase(phase);
-        if (pass)
-            passMask |= 1u << phase;
-        UART_CStr("  phase ");
-        UART_UInt(phase);
-        if (pass) {
-            UART_CStr(": PASS\r\n");
-        } else {
-            UART_CStr(": FAIL code=0x");
-            UART_Hex32(probeFailure);
-            UART_CStr("\r\n");
-        }
-    }
-
-    uint32_t selected = choose_window_center(passMask);
-    UART_CStr("phase pass mask=0x");
-    UART_Hex32(passMask);
-    UART_CStr(" selected=");
-    UART_UInt(selected);
-    UART_CStr(passMask == 0u ? "  NO WINDOW\r\n" : "  WINDOW CENTER\r\n");
-
-    PSRAM_SetPhase(selected);
-    phase_settle();
-    select_back_die(0u);
-    return selected;
 }
 
 static uint32_t test_boundaries(void)
@@ -370,12 +227,13 @@ static uint32_t test_full_die(uint32_t die)
     return bad;
 }
 
+static const uint16_t hdmiColors[8] = {
+    0xffffu, 0xffe0u, 0x07ffu, 0x07e0u,
+    0xf81fu, 0xf800u, 0x001fu, 0x0000u
+};
+
 static void draw_hdmi_color_bars(void)
 {
-    static const uint16_t colors[8] = {
-        0xffffu, 0xffe0u, 0x07ffu, 0x07e0u,
-        0xf81fu, 0xf800u, 0x001fu, 0x0000u
-    };
     volatile uint32_t *frame = PSRAM_U32;
 
     // Each 32-bit CPU store places two adjacent RGB565 pixels into the single
@@ -383,16 +241,15 @@ static void draw_hdmi_color_bars(void)
     for (uint32_t y = 0u; y < HDMI_HEIGHT; ++y) {
         uint32_t row = y * (HDMI_WIDTH / 2u);
         for (uint32_t bar = 0u; bar < 8u; ++bar) {
-            uint32_t packed = (uint32_t)colors[bar] |
-                              ((uint32_t)colors[bar] << 16);
+            uint32_t packed = (uint32_t)hdmiColors[bar] |
+                              ((uint32_t)hdmiColors[bar] << 16);
             for (uint32_t pair = 0u; pair < HDMI_WIDTH / 16u; ++pair)
                 frame[row + bar * (HDMI_WIDTH / 16u) + pair] = packed;
         }
     }
 }
 
-// Bit 0 is the left-most pixel.  XOR makes this cursor self-erasing: applying
-// the same shape at the old position restores the original RGB565 pixels.
+// Bit 0 is the left-most pixel.
 static const uint8_t cursorShape[CURSOR_HEIGHT] = {
     0x01u,
     0x03u,
@@ -406,6 +263,24 @@ static const uint8_t cursorShape[CURSOR_HEIGHT] = {
 static uint32_t cursorOldX[2];
 static uint32_t cursorOldY[2];
 static uint32_t cursorValid[2];
+
+static void restore_cursor_background(uint32_t x, uint32_t y)
+{
+    uint32_t xWord = x / 2u;
+
+    // The demo background is deterministic.  Reconstructing it is safer than
+    // relying on an XOR toggle to have run exactly once on each physical die.
+    for (uint32_t line = 0u; line < CURSOR_HEIGHT; ++line) {
+        uint32_t row = (y + line) * (HDMI_WIDTH / 2u) + xWord;
+        for (uint32_t word = 0u; word < CURSOR_WORDS_PER_ROW; ++word) {
+            uint32_t pixel0 = x + word * 2u;
+            uint32_t pixel1 = pixel0 + 1u;
+            uint32_t packed = (uint32_t)hdmiColors[pixel0 / (HDMI_WIDTH / 8u)] |
+                              ((uint32_t)hdmiColors[pixel1 / (HDMI_WIDTH / 8u)] << 16);
+            PSRAM_U32[row + word] = packed;
+        }
+    }
+}
 
 static void xor_cursor(uint32_t x, uint32_t y)
 {
@@ -444,7 +319,7 @@ static void animate_cursor(void)
     for (;;) {
         uint32_t die = PSRAM_GetBackDie();
         if (cursorValid[die])
-            xor_cursor(cursorOldX[die], cursorOldY[die]);
+            restore_cursor_background(cursorOldX[die], cursorOldY[die]);
         xor_cursor(x, y);
         cursorOldX[die] = x;
         cursorOldY[die] = y;
@@ -505,7 +380,7 @@ int main(void)
     print_result("physical bytes", PSRAM_PHYS_BYTES_REG, PSRAM_PHYSICAL_SIZE);
     print_result("power-up phase", PSRAM_PHASE_REG, 5u);
 
-    selectedPhase = train_phase();
+    selectedPhase = PSRAM_TrainPhase();
     print_result("trained phase", PSRAM_PHASE_REG, selectedPhase);
 
     for (uint32_t die = 0u; die < 2u; ++die) {
