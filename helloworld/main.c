@@ -391,44 +391,40 @@ static void draw_hdmi_color_bars(void)
     }
 }
 
-// Each physical die keeps its own saved background because it becomes the CPU
-// back buffer on alternate frames.  One aligned lw contains two RGB565 pixels.
-static uint32_t cursorSaved[2][CURSOR_HEIGHT * CURSOR_WORDS_PER_ROW];
-static uint32_t cursorSavedX[2];
-static uint32_t cursorSavedY[2];
-static uint32_t cursorSavedValid[2];
+// Bit 0 is the left-most pixel.  XOR makes this cursor self-erasing: applying
+// the same shape at the old position restores the original RGB565 pixels.
+static const uint8_t cursorShape[CURSOR_HEIGHT] = {
+    0x01u,
+    0x03u,
+    0x07u,
+    0x0fu,
+    0x1fu,
+    0x3fu,
+    0x1bu,
+    0x31u
+};
+static uint32_t cursorOldX[2];
+static uint32_t cursorOldY[2];
+static uint32_t cursorValid[2];
 
-static void restore_cursor(uint32_t die)
-{
-    if (!cursorSavedValid[die])
-        return;
-
-    uint32_t xWord = cursorSavedX[die] / 2u;
-    for (uint32_t y = 0u; y < CURSOR_HEIGHT; ++y) {
-        uint32_t row = (cursorSavedY[die] + y) * (HDMI_WIDTH / 2u) + xWord;
-        for (uint32_t word = 0u; word < CURSOR_WORDS_PER_ROW; ++word)
-            PSRAM_U32[row + word] = cursorSaved[die][y * CURSOR_WORDS_PER_ROW + word];
-    }
-}
-
-static void draw_cursor(uint32_t die, uint32_t x, uint32_t y)
+static void xor_cursor(uint32_t x, uint32_t y)
 {
     uint32_t xWord = x / 2u;
 
     for (uint32_t line = 0u; line < CURSOR_HEIGHT; ++line) {
         uint32_t row = (y + line) * (HDMI_WIDTH / 2u) + xWord;
         for (uint32_t word = 0u; word < CURSOR_WORDS_PER_ROW; ++word) {
-            // This volatile 32-bit read compiles to one lw and fetches two
-            // adjacent RGB565 pixels.  Inverting them keeps the cursor visible
-            // over every color bar without needing a separate alpha format.
-            uint32_t background = PSRAM_U32[row + word];
-            cursorSaved[die][line * CURSOR_WORDS_PER_ROW + word] = background;
-            PSRAM_U32[row + word] = ~background;
+            uint32_t pair = (cursorShape[line] >> (word * 2u)) & 3u;
+            uint32_t mask = (pair & 1u ? 0x0000ffffu : 0u) |
+                            (pair & 2u ? 0xffff0000u : 0u);
+            if (mask != 0u) {
+                // One aligned lw returns {pixel[x+1], pixel[x]}; the mask
+                // changes only arrow pixels before the full word is sw'd back.
+                uint32_t pixels = PSRAM_U32[row + word];
+                PSRAM_U32[row + word] = pixels ^ mask;
+            }
         }
     }
-    cursorSavedX[die] = x;
-    cursorSavedY[die] = y;
-    cursorSavedValid[die] = 1u;
 }
 
 static void cursor_delay(void)
@@ -442,13 +438,17 @@ static void animate_cursor(void)
 {
     uint32_t x = 0u;
     uint32_t y = (HDMI_HEIGHT - CURSOR_HEIGHT) / 2u;
-    int32_t dx = 4;
+    int32_t dx = 2;
 
-    UART_CStr("moving 8x8 cursor: 32 lw per back-buffer frame\r\n");
+    UART_CStr("moving 8x8 arrow cursor: masked lw/sw on back buffer\r\n");
     for (;;) {
         uint32_t die = PSRAM_GetBackDie();
-        restore_cursor(die);
-        draw_cursor(die, x, y);
+        if (cursorValid[die])
+            xor_cursor(cursorOldX[die], cursorOldY[die]);
+        xor_cursor(x, y);
+        cursorOldX[die] = x;
+        cursorOldY[die] = y;
+        cursorValid[die] = 1u;
 
         if (!swap_at_hdmi_frame()) {
             UART_CStr("cursor swap timeout\r\n");
