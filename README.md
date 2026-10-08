@@ -161,6 +161,10 @@ underflow 调试标志。
 `0x0300_0020` bit 0 启动 HDMI。HDMI 读取一帧完成后持续产生真实帧边界，
 因此后续软件只需要绘制 back、请求 swap，无需再写软件帧完成 bit。
 
+示例固件会先把两个 die 都初始化成相同色条，然后让一个 8x8 反色光标水平
+移动。每次只在 back die 用 32 条 `lw` 保存光标下面的 64 个 RGB565 像素，
+恢复该 die 上一次光标位置并重画；正常 HDMI 帧边界 swap 后才显示。
+
 RGB565 的有效像素流量约为 `640 * 480 * 2 * 60.3 = 37.0 MB/s`。单个 x8
 PSRAM die 在 80 MHz DDR 下的原始数据率为 160 MB/s；HDMI 独占 front die，
 不会与 CPU/GPU 的 back die 流量仲裁。

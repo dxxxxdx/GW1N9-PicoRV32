@@ -8,6 +8,10 @@
 #define SWAP_STRESS_ROUNDS   256u
 #define HDMI_WIDTH            640u
 #define HDMI_HEIGHT           480u
+#define CURSOR_WIDTH            8u
+#define CURSOR_HEIGHT           8u
+#define CURSOR_WORDS_PER_ROW   (CURSOR_WIDTH / 2u)
+#define CURSOR_DELAY_LOOPS     200000u
 
 static void print_result(const char *name, uint32_t got, uint32_t want)
 {
@@ -32,6 +36,20 @@ static int swap_back_die(void)
     // Before HDMI exists, bit1 injects the frame boundary that will later come
     // from the display controller.  The switcher still waits for both PHYs idle.
     PSRAM_TestSwap();
+    for (uint32_t i = 0u; i < SWAP_TIMEOUT; ++i) {
+        if (PSRAM_GetSwapCount() != before)
+            return 1;
+    }
+    return 0;
+}
+
+static int swap_at_hdmi_frame(void)
+{
+    uint32_t before = PSRAM_GetSwapCount();
+
+    // Production swap: HDMI supplies the safe frame boundary.  Do not inject
+    // the software test pulse here, otherwise the visible frame may tear.
+    PSRAM_RequestSwap();
     for (uint32_t i = 0u; i < SWAP_TIMEOUT; ++i) {
         if (PSRAM_GetSwapCount() != before)
             return 1;
@@ -373,6 +391,79 @@ static void draw_hdmi_color_bars(void)
     }
 }
 
+// Each physical die keeps its own saved background because it becomes the CPU
+// back buffer on alternate frames.  One aligned lw contains two RGB565 pixels.
+static uint32_t cursorSaved[2][CURSOR_HEIGHT * CURSOR_WORDS_PER_ROW];
+static uint32_t cursorSavedX[2];
+static uint32_t cursorSavedY[2];
+static uint32_t cursorSavedValid[2];
+
+static void restore_cursor(uint32_t die)
+{
+    if (!cursorSavedValid[die])
+        return;
+
+    uint32_t xWord = cursorSavedX[die] / 2u;
+    for (uint32_t y = 0u; y < CURSOR_HEIGHT; ++y) {
+        uint32_t row = (cursorSavedY[die] + y) * (HDMI_WIDTH / 2u) + xWord;
+        for (uint32_t word = 0u; word < CURSOR_WORDS_PER_ROW; ++word)
+            PSRAM_U32[row + word] = cursorSaved[die][y * CURSOR_WORDS_PER_ROW + word];
+    }
+}
+
+static void draw_cursor(uint32_t die, uint32_t x, uint32_t y)
+{
+    uint32_t xWord = x / 2u;
+
+    for (uint32_t line = 0u; line < CURSOR_HEIGHT; ++line) {
+        uint32_t row = (y + line) * (HDMI_WIDTH / 2u) + xWord;
+        for (uint32_t word = 0u; word < CURSOR_WORDS_PER_ROW; ++word) {
+            // This volatile 32-bit read compiles to one lw and fetches two
+            // adjacent RGB565 pixels.  Inverting them keeps the cursor visible
+            // over every color bar without needing a separate alpha format.
+            uint32_t background = PSRAM_U32[row + word];
+            cursorSaved[die][line * CURSOR_WORDS_PER_ROW + word] = background;
+            PSRAM_U32[row + word] = ~background;
+        }
+    }
+    cursorSavedX[die] = x;
+    cursorSavedY[die] = y;
+    cursorSavedValid[die] = 1u;
+}
+
+static void cursor_delay(void)
+{
+    // Deliberately simple bring-up delay; volatile prevents optimization.
+    for (volatile uint32_t i = 0u; i < CURSOR_DELAY_LOOPS; ++i)
+        __asm__ volatile ("nop");
+}
+
+static void animate_cursor(void)
+{
+    uint32_t x = 0u;
+    uint32_t y = (HDMI_HEIGHT - CURSOR_HEIGHT) / 2u;
+    int32_t dx = 4;
+
+    UART_CStr("moving 8x8 cursor: 32 lw per back-buffer frame\r\n");
+    for (;;) {
+        uint32_t die = PSRAM_GetBackDie();
+        restore_cursor(die);
+        draw_cursor(die, x, y);
+
+        if (!swap_at_hdmi_frame()) {
+            UART_CStr("cursor swap timeout\r\n");
+            return;
+        }
+
+        if (dx > 0 && x + CURSOR_WIDTH + (uint32_t)dx > HDMI_WIDTH)
+            dx = -dx;
+        else if (dx < 0 && x < (uint32_t)(-dx))
+            dx = -dx;
+        x = (uint32_t)((int32_t)x + dx);
+        cursor_delay();
+    }
+}
+
 int main(void)
 {
     uint32_t status;
@@ -456,14 +547,17 @@ int main(void)
 
     UART_CStr("final swap status=0x");
     UART_Hex32(PSRAM_SWAP_REG);
-    UART_CStr("\r\nrender 640x480 RGB565 color bars...\r\n");
+    UART_CStr("\r\nrender both 640x480 RGB565 framebuffers...\r\n");
     select_back_die(0u);
     draw_hdmi_color_bars();
-    if (swap_back_die()) {
+    select_back_die(1u);
+    draw_hdmi_color_bars();
+    if (PSRAM_GetBackDie() == 1u) {
         PSRAM_HDMIEnable();
-        UART_CStr("HDMI enabled; color-bar die is now front\r\n");
+        UART_CStr("HDMI enabled; front/back color bars initialized\r\n");
+        animate_cursor();
     } else {
-        UART_CStr("HDMI enable failed: final swap timeout\r\n");
+        UART_CStr("HDMI enable failed: framebuffer select timeout\r\n");
     }
     UART_CStr("done\r\n");
     for (;;) {
