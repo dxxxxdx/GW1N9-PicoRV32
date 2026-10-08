@@ -70,8 +70,11 @@ module tb_psramHdmiReader;
     integer commandCount = 0;
     integer beat = 0;
     integer wordsPopped = 0;
+    integer wordsPushed = 0;
+    reg [15:0] expectedPixels [0:2047];
     reg busy = 1'b0;
     reg [21:0] activeAddr;
+    integer interBurstGap = 0;
 
     always @(posedge phy_clk) begin
         r_valid <= 1'b0;
@@ -81,6 +84,12 @@ module tb_psramHdmiReader;
             commandCount <= 0;
             beat <= 0;
             busy <= 1'b0;
+            wordsPushed <= 0;
+            interBurstGap <= 0;
+        end else if (interBurstGap != 0) begin
+            interBurstGap <= interBurstGap - 1;
+            if (interBurstGap == 1)
+                cmd_ready <= 1'b1;
         end else if (cmd_valid && cmd_ready) begin
             if (cmd_words !== 7'd8)
                 $fatal(1, "DMA did not request an eight-word test burst");
@@ -96,19 +105,30 @@ module tb_psramHdmiReader;
             r_valid <= 1'b1;
             r_last <= beat == 7;
             r_data <= activeAddr[15:0] + beat;
+            expectedPixels[wordsPushed] <= activeAddr[15:0] + beat;
+            wordsPushed <= wordsPushed + 1;
             if (beat == 7) begin
                 busy <= 1'b0;
                 cmd_done <= 1'b1;
-                cmd_ready <= 1'b1;
+                // Force the FIFO to become empty between bursts.  This catches
+                // a stale occupancy count that emits one old word at empty.
+                interBurstGap <= 20;
             end else begin
                 beat <= beat + 1;
             end
         end
     end
 
-    always @(posedge pixel_clk)
-        if (pixel_take)
+    always @(posedge pixel_clk) begin
+        if (pixel_take) begin
+            if (wordsPopped >= wordsPushed)
+                $fatal(1, "FIFO emitted an unproduced pixel at %0d", wordsPopped);
+            if (pixel_data !== expectedPixels[wordsPopped])
+                $fatal(1, "pixel %0d got %04x expected %04x",
+                       wordsPopped, pixel_data, expectedPixels[wordsPopped]);
             wordsPopped <= wordsPopped + 1;
+        end
+    end
 
     integer timeout;
     initial begin

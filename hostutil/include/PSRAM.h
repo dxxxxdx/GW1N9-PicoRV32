@@ -109,10 +109,4 @@ static inline void PSRAM_HDMIEnable(void)
 // the index of the first mismatch.
 uint32_t PSRAM_TestPattern(uint32_t words);
 
-// Sweep all 16 CK phase taps across both dies, select the center of the widest
-// common pass window, and leave physical die 0 mapped as the CPU back buffer.
-// This bring-up routine uses the software frame-boundary injection and must run
-// before HDMI is enabled.  It also prints the per-phase result over UART.
-uint32_t PSRAM_TrainPhase(void);
-
 #endif

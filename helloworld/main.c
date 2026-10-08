@@ -7,10 +7,14 @@
 #define SWAP_STRESS_ROUNDS   256u
 #define HDMI_WIDTH            640u
 #define HDMI_HEIGHT           480u
+#define HDMI_FRAME_BYTES      (HDMI_WIDTH * HDMI_HEIGHT * 2u)
 #define CURSOR_WIDTH            8u
 #define CURSOR_HEIGHT           8u
 #define CURSOR_WORDS_PER_ROW   (CURSOR_WIDTH / 2u)
 #define CURSOR_DELAY_LOOPS     200000u
+
+_Static_assert(HDMI_FRAME_BYTES <= PSRAM_SIZE,
+               "RGB565 framebuffer exceeds one physical PSRAM die");
 
 static void print_result(const char *name, uint32_t got, uint32_t want)
 {
@@ -344,7 +348,6 @@ int main(void)
     uint32_t status;
     uint32_t laneFailures = 0u;
     uint32_t boundaryFailures = 0u;
-    uint32_t selectedPhase;
     uint32_t swapFailures;
     uint32_t bad0;
     uint32_t bad1;
@@ -378,10 +381,7 @@ int main(void)
 
     print_result("logical bytes", PSRAM_BYTES_REG, PSRAM_SIZE);
     print_result("physical bytes", PSRAM_PHYS_BYTES_REG, PSRAM_PHYSICAL_SIZE);
-    print_result("power-up phase", PSRAM_PHASE_REG, 5u);
-
-    selectedPhase = PSRAM_TrainPhase();
-    print_result("trained phase", PSRAM_PHASE_REG, selectedPhase);
+    print_result("fixed phase", PSRAM_PHASE_REG, 5u);
 
     for (uint32_t die = 0u; die < 2u; ++die) {
         if (!select_back_die(die)) {

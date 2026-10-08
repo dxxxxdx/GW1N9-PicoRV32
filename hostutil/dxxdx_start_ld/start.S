@@ -13,6 +13,8 @@
 
 /* PSRAM status register: bit0 = initDone. */
     .equ PSRAM_STATUS,   0x03000004
+    .equ PSRAM_PHASE,    0x03000008
+    .equ PSRAM_FIXED_PHASE, 5
 
 _start:
     /*
@@ -81,6 +83,11 @@ _start:
      * 这个循环正常是直接穿过去的，留着是防以后改短欢迎串。
      */
 .Lwait_psram:
+    /* Board-characterized center tap; runtime phase training is not needed. */
+    li      t0, PSRAM_PHASE
+    li      t1, PSRAM_FIXED_PHASE
+    sw      t1, 0(t0)
+
     li      t0, PSRAM_STATUS
 .Lpsram_poll:
     lw      t1, 0(t0)

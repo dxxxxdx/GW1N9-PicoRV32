@@ -155,7 +155,11 @@ module psramHdmiAsyncFifo #(
 
     wire [ABITS-1:0] readPtrWrite = grayToBin(readGraySync);
     wire [ABITS-1:0] writePtrRead = grayToBin(writeGraySync);
-    wire [ABITS-1:0] ramReadPtr = read_enable ? readPtr + 1'b1 : readPtr;
+    wire [ABITS-1:0] writePtrNext = writePtr +
+                                      (write_enable ? 1'b1 : 1'b0);
+    wire [ABITS-1:0] readPtrNext = readPtr +
+                                     (read_enable ? 1'b1 : 1'b0);
+    wire [ABITS-1:0] ramReadPtr = readPtrNext;
 
     // One physical 16-kbit BSRAM, used as 512 x 16.  In 16-bit mode ADA[1:0]
     // are byte-write enables and ADA[13:4]/ADB[13:4] are word addresses.
@@ -191,10 +195,12 @@ module psramHdmiAsyncFifo #(
         end else begin
             readGrayMeta <= readGray;
             readGraySync <= readGrayMeta;
-            write_free <= readPtrWrite - writePtr - 1'b1;
+            // Account for a write accepted on this edge.  Using writePtr here
+            // would leave the count one cycle stale at the full boundary.
+            write_free <= readPtrWrite - writePtrNext - 1'b1;
             if (write_enable) begin
-                writePtr <= writePtr + 1'b1;
-                writeGray <= binToGray(writePtr + 1'b1);
+                writePtr <= writePtrNext;
+                writeGray <= binToGray(writePtrNext);
             end
         end
     end
@@ -209,10 +215,13 @@ module psramHdmiAsyncFifo #(
         end else begin
             writeGrayMeta <= writeGray;
             writeGraySync <= writeGrayMeta;
-            read_available <= writePtrRead - readPtr;
+            // Account for a read accepted on this edge.  This is the critical
+            // empty-boundary fix: the following cycle must not consume a
+            // second, unwritten BSRAM location.
+            read_available <= writePtrRead - readPtrNext;
             if (read_enable) begin
-                readPtr <= readPtr + 1'b1;
-                readGray <= binToGray(readPtr + 1'b1);
+                readPtr <= readPtrNext;
+                readGray <= binToGray(readPtrNext);
             end
         end
     end

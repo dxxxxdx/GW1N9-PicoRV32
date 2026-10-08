@@ -27,8 +27,8 @@ A swap changes only these two ownership bits.  It does not copy memory.
 
 - CPU, MMIO and normal bus: 40 MHz
 - two PSRAM PHYs: 80 MHz
-- PSRAM CK: 80 MHz with dynamic rPLL phase
-- default phase: tap 5, from the measured common pass window 2..7
+- PSRAM CK: 80 MHz with dynamic rPLL phase hardware
+- startup phase: fixed tap 5, the measured common pass-window center (2..7)
 - CR0: `0x9FEF`, latency 3, fixed 2x latency, 35-ohm drive
 - power-up: each PHY waits 160 us and configures its own die
 
@@ -107,13 +107,13 @@ bits 31:16 = completed swap count
 
 ## Firmware bring-up
 
-The current firmware uses the software frame-done bit to:
+The current firmware writes the characterized phase tap 5 from `start.S`, then
+uses the software frame-done bit to:
 
-1. train all 16 phases through both physical dies;
-2. test byte/halfword lanes and 4 MiB boundaries on both dies;
-3. write different values at the same logical address on each die and verify
+1. test byte/halfword lanes and 4 MiB boundaries on both dies;
+2. write different values at the same logical address on each die and verify
    that swapping preserves both values;
-4. run a full 4 MiB write/read test on die 0 and then die 1.
+3. run a full 4 MiB write/read test on die 0 and then die 1.
 
 The `.psram` linker section is `NOLOAD` and is limited to the logical 4 MiB
 back window.  Firmware cannot directly address the front die; it must request a
@@ -125,7 +125,9 @@ The HDMI front-port reader is implemented.  A 640x480 RGB565 frame begins at
 offset zero and occupies 614400 bytes.  It fetches 64 pixels/128 bytes per
 burst, for exactly 4800 bursts per frame, and reserves a whole burst plus a
 small CDC margin before launching.  The 512 x 16 FIFO is an explicit `SDPB`,
-so it consumes one BSRAM rather than about 8192 flip-flops.
+so it consumes one BSRAM rather than about 8192 flip-flops.  Its registered
+occupancy uses the post-transfer local pointer; using the old local pointer at
+an empty transition authorizes one stale read and shifts the following stream.
 
 The video clock tree is 126.667 MHz serializer `/5` to 25.333 MHz pixel clock.
 With the Tang Nano 800x525 raster this is about 60.3 Hz and about 37.0 MB/s of
