@@ -4,6 +4,8 @@
 
 #define TRAIN_WORDS_PER_DIE (32u * 1024u) // 128 KiB per die and pattern
 #define SWAP_TIMEOUT         1000000u
+#define SWAP_STRESS_WORDS    (16u * 1024u) // 64 KiB checked after every swap
+#define SWAP_STRESS_ROUNDS   256u
 
 static void print_result(const char *name, uint32_t got, uint32_t want)
 {
@@ -245,6 +247,79 @@ static uint32_t test_swap_isolation(void)
     return failures;
 }
 
+static uint32_t test_swap_stress(void)
+{
+    static const uint32_t patterns[2] = {0xaaaaaaaau, 0x55555555u};
+
+    UART_CStr("swap stress: fill 64 KiB/die, then swap+verify 256 rounds\r\n");
+
+    // Different byte fills make a wrong logical-to-physical mapping visible:
+    // die0 is all 0xaa while die1 is all 0x55.
+    for (uint32_t die = 0u; die < 2u; ++die) {
+        if (!select_back_die(die)) {
+            UART_CStr("  FAIL: fill swap timeout on die");
+            UART_UInt(die);
+            UART_CStr("\r\n");
+            return 1u;
+        }
+        for (uint32_t i = 0u; i < SWAP_STRESS_WORDS; ++i)
+            PSRAM_U32[i] = patterns[die];
+    }
+
+    // Filling ends on die1, so starting at die0 guarantees that every round
+    // actually crosses the frame-swap barrier and flips the mapping.
+    for (uint32_t round = 0u; round < SWAP_STRESS_ROUNDS; ++round) {
+        uint32_t die = round & 1u;
+        uint32_t want = patterns[die];
+
+        if (!select_back_die(die)) {
+            UART_CStr("  FAIL: swap timeout at round ");
+            UART_UInt(round);
+            UART_CStr("\r\n");
+            return 1u;
+        }
+        if (PSRAM_GetBackDie() != die) {
+            UART_CStr("  FAIL: wrong back die at round ");
+            UART_UInt(round);
+            UART_CStr("\r\n");
+            return 1u;
+        }
+
+        for (uint32_t i = 0u; i < SWAP_STRESS_WORDS; ++i) {
+            uint32_t got = PSRAM_U32[i];
+            if (got != want) {
+                UART_CStr("  FAIL: round=");
+                UART_UInt(round);
+                UART_CStr(" die=");
+                UART_UInt(die);
+                UART_CStr(" offset=0x");
+                UART_Hex32(i * sizeof(uint32_t));
+                UART_CStr(" got=0x");
+                UART_Hex32(got);
+                UART_CStr(" want=0x");
+                UART_Hex32(want);
+                UART_CStr(" swapStatus=0x");
+                UART_Hex32(PSRAM_SWAP_REG);
+                UART_CStr("\r\n");
+                return 1u;
+            }
+        }
+
+        if (((round + 1u) & 31u) == 0u) {
+            UART_CStr("  rounds OK: ");
+            UART_UInt(round + 1u);
+            UART_CStr("\r\n");
+        }
+    }
+
+    if (!select_back_die(0u)) {
+        UART_CStr("  FAIL: final select die0 timeout\r\n");
+        return 1u;
+    }
+    UART_CStr("swap stress: PASS\r\n");
+    return 0u;
+}
+
 static uint32_t test_full_die(uint32_t die)
 {
     uint32_t bad;
@@ -284,6 +359,7 @@ int main(void)
     uint32_t swapFailures;
     uint32_t bad0;
     uint32_t bad1;
+    uint32_t stressFailures;
 
     IRQ_Init();
     IRQ_Enable(IRQ_CH0);
@@ -349,6 +425,11 @@ int main(void)
         UART_CStr("both physical dies: PASS\r\n");
     else
         UART_CStr("both physical dies: FAIL\r\n");
+
+    stressFailures = test_swap_stress();
+    UART_CStr("swap stress failures=");
+    UART_UInt(stressFailures);
+    UART_CStr(stressFailures == 0u ? "  OK\r\n" : "  FAIL\r\n");
 
     UART_CStr("final swap status=0x");
     UART_Hex32(PSRAM_SWAP_REG);
