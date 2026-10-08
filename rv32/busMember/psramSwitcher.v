@@ -122,19 +122,24 @@ module psramSwitcher (
 
     wire frameStartsBarrier = frame_done_pulse &&
                               (swap_pending || swap_request_pulse);
-    wire barrierActive = swapBarrier || frameStartsBarrier;
-    wire acceptEnabled = bothInitialized && !barrierActive;
+    // A frame-done edge latches the barrier.  A command accepted on that same
+    // edge is tracked by active0/active1 and drained before the swap, so there
+    // is no need to feed frame_done combinationally into every PHY command.
+    wire acceptEnabled = bothInitialized && !swapBarrier;
 
     assign hdmi_cmd_ready = acceptEnabled && frontFree;
     assign gpu_cmd_ready  = acceptEnabled && backFree;
     assign cpu_cmd_ready  = acceptEnabled && backFree && !gpu_cmd_valid;
 
-    wire backCmdValid = gpu_cmd_valid ? gpu_cmd_ready :
-                                       (cpu_cmd_valid && cpu_cmd_ready);
+    // Valid must not depend on ready.  Keeping the two sides independent cuts
+    // the otherwise long PHY-state -> arbiter -> PHY-state combinational path
+    // and follows the normal valid/ready contract: the chosen request remains
+    // asserted until the target PHY accepts it.
+    wire backCmdValid = acceptEnabled && (gpu_cmd_valid || cpu_cmd_valid);
     wire backCmdWr = gpu_cmd_valid ? gpu_cmd_wr : cpu_cmd_wr;
     wire [21:0] backCmdAddr = gpu_cmd_valid ? gpu_cmd_addr : cpu_cmd_addr;
     wire [ 6:0] backCmdWords = gpu_cmd_valid ? gpu_cmd_words : cpu_cmd_words;
-    wire frontCmdValid = hdmi_cmd_valid && hdmi_cmd_ready;
+    wire frontCmdValid = acceptEnabled && hdmi_cmd_valid;
 
     // A physical command is a one-cycle valid/ready transfer.  Front and back
     // target opposite dies, so they may both launch in the same cycle.

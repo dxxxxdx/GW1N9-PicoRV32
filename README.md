@@ -23,11 +23,16 @@ UART RX -> 裸字节程序加载器 -> 16 KiB 程序 BSRAM
                                          CPU / GPU -> switcher <- HDMI
                                                         |   |
                                                      PHY0   PHY1
+                                                               |
+                                      128 B burst DMA -> async BSRAM FIFO
+                                                               |
+                                       RGB565 -> TMDS -> HDMI differential IO
 ```
 
-50 MHz 板载晶振经一个 rPLL 产生 40 MHz CPU/总线时钟、80 MHz PSRAM PHY
-时钟以及可动态调相的 80 MHz PSRAM CK。当前实测相位通过窗口为 2..7，默认
-选择窗口中点 5。
+第一颗 rPLL 将 50 MHz 板载晶振变成 40 MHz CPU/总线时钟、80 MHz PSRAM
+PHY 时钟以及可动态调相的 80 MHz PSRAM CK。当前实测相位通过窗口为 2..7，
+默认选择窗口中点 5。第二颗 rPLL 从 40 MHz 产生 126.667 MHz TMDS 串行时钟，
+再经 `/5` 得到 25.333 MHz 像素时钟；640x480、800x525 总时序约为 60.3 Hz。
 
 ## 目录
 
@@ -52,6 +57,11 @@ GW1N-9_rv32/
 │   │   ├── UARTRX.v         # 50 MHz / 115200 / 8-N-1 接收器
 │   │   ├── UARTTX.v         # 50 MHz / 115200 / 8-N-1 发送器
 │   │   └── UARTTX_MMIO.v    # PicoRV32 总线到 UART TX 的 MMIO 包装
+│   ├── HDMI/
+│   │   ├── hdmiClock.v      # 126.667 MHz TMDS 与 25.333 MHz 像素时钟
+│   │   ├── hdmiTmdsEncoder.v # 8-bit 视频/控制符号到 10-bit TMDS
+│   │   ├── psramHdmiReader.v # front die DMA 与双时钟 BSRAM FIFO
+│   │   └── hdmiTx.v         # 640x480 时序、OSER10 与差分输出
 │   └── miscmodule/
 │       └── ButtonDebounce.v # RESET/START/IRQ 低有效按键消抖
 ├── tools/
@@ -83,6 +93,10 @@ rv32/busMember/rv32RegisterRam.v
 rv32/busMember/UARTRX.v
 rv32/busMember/UARTTX.v
 rv32/busMember/UARTTX_MMIO.v
+rv32/HDMI/hdmiClock.v
+rv32/HDMI/hdmiTmdsEncoder.v
+rv32/HDMI/psramHdmiReader.v
+rv32/HDMI/hdmiTx.v
 rv32/miscmodule/ButtonDebounce.v
 ```
 
@@ -97,6 +111,8 @@ rv32/miscmodule/ButtonDebounce.v
 | `uartRx` | 输入 | 115200 baud、8-N-1 |
 | `uartTx` | 输出 | 115200 baud、8-N-1，空闲为高 |
 | `trap` | 输出 | PicoRV32 非法指令、地址错误等陷阱指示 |
+| `tmds_clk_p/n` | 输出 | HDMI/DVI TMDS 差分像素时钟 |
+| `tmds_d_p/n[2:0]` | 输出 | HDMI/DVI TMDS 蓝、绿、红三个差分数据通道 |
 
 引脚位置和 IO 电平标准在板级 CST 中配置。主时钟还应加入 SDC 时序约束：
 
@@ -126,11 +142,28 @@ PSRAM 两个物理 die 各为 4 MiB。HDMI 端独占逻辑前台 die；CPU 与�
 switcher 才原子翻转 front/back 映射。没有 HDMI 时可同时写 bit 1 注入软件
 帧完成脉冲做上板测试；详细寄存器定义见 `hostutil/include/PSRAM.h`。
 
-PHY、switcher 与预留 GPU/HDMI 端口现在统一使用 1..64 个 16-bit beat 的
+PHY、switcher 与 GPU/HDMI 端口统一使用 1..64 个 16-bit beat 的
 突发接口（最大 128 字节）。CPU 的一次 `lw/sw` 只发送一次 CA，随后用两个
 连续的低 16 位 beat 完成；32 位拆分和拼接留在 CPU bridge 内，软件看到的
-访问语义不变。读突发启动后不能反压，因此后续 HDMI 读取器必须先在 BSRAM
-行缓冲中预留完整突发的空间。
+访问语义不变。读突发启动后不能反压，因此 HDMI DMA 只有在异步 FIFO 能容纳
+完整 64-beat 突发时才发命令。
+
+## HDMI framebuffer
+
+当前视频模式沿用 Tang Nano 9K 例程的 640x480 时序，像素格式为 RGB565。
+一帧占 `640 * 480 * 2 = 614400` 字节，从 front die 偏移 `0` 开始存放。
+HDMI DMA 每次从 PSRAM 连续读取 64 个 16-bit 像素（128 字节），通过一块
+`512 x 16` 真双口 BSRAM 跨到像素时钟域；FIFO 断流时输出黑色并锁存
+underflow 调试标志。
+
+固件先在逻辑 back die 绘制八色条，写 `0x0300_0018` 请求交换；交换只会在
+当前 front 帧的最后一次 PSRAM burst 完成且两个 PHY 都空闲时发生。随后写
+`0x0300_0020` bit 0 启动 HDMI。HDMI 读取一帧完成后持续产生真实帧边界，
+因此后续软件只需要绘制 back、请求 swap，无需再写软件帧完成 bit。
+
+RGB565 的有效像素流量约为 `640 * 480 * 2 * 60.3 = 37.0 MB/s`。单个 x8
+PSRAM die 在 80 MHz DDR 下的原始数据率为 160 MB/s；HDMI 独占 front die，
+不会与 CPU/GPU 的 back die 流量仲裁。
 
 ## UART TX MMIO
 

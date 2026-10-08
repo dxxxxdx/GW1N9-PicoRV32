@@ -16,6 +16,10 @@
         <File path="rv32/busMember/psramPhy.v" type="file.verilog" enable="1"/>
         <File path="rv32/busMember/psramSwitcher.v" type="file.verilog" enable="1"/>
         <File path="rv32/busMember/psramController.v" type="file.verilog" enable="1"/>
+        <File path="rv32/HDMI/hdmiClock.v" type="file.verilog" enable="1"/>
+        <File path="rv32/HDMI/hdmiTmdsEncoder.v" type="file.verilog" enable="1"/>
+        <File path="rv32/HDMI/psramHdmiReader.v" type="file.verilog" enable="1"/>
+        <File path="rv32/HDMI/hdmiTx.v" type="file.verilog" enable="1"/>
         <File path="rv32/gowin_rpll.v" type="file.verilog" enable="1"/>
         <File path="rv32/rv32top.v" type="file.verilog" enable="1"/>
         <File path="picorv32-1N9.cst" type="file.cst" enable="1"/>

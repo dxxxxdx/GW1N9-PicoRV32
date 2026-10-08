@@ -17,7 +17,7 @@ opposite, front die.
 Reset ownership is:
 
 ```text
-front = die 1   (future HDMI)
+front = die 1   (HDMI)
 back  = die 0   (CPU/GPU)
 ```
 
@@ -57,8 +57,9 @@ without backpressure, so an HDMI reader must reserve enough line-FIFO space
 before issuing its command.  `*_done` releases ownership after the physical
 recovery interval.
 
-The top level ties the future GPU and HDMI ports inactive for now.  CPU-only
-bring-up therefore exercises back through the normal PicoRV32 memory window.
+The top level ties the future GPU port inactive for now.  HDMI is connected to
+front through `psramHdmiReader`: it issues 64-beat reads and crosses the data
+to the pixel clock through one 512 x 16 dual-clock BSRAM FIFO.
 
 ## Frame swap handshake
 
@@ -67,8 +68,9 @@ The CPU writes `SWAP_REQUEST`.  The request remains pending and
 The switcher then blocks new commands, drains accepted physical and logical
 transactions, and atomically flips front/back.
 
-Before HDMI exists, MMIO bit 1 injects a software frame-done event so both
-physical dies can be tested through the one logical window.
+While HDMI is disabled, MMIO bit 1 injects a software frame-done event so both
+physical dies can be tested through the one logical window.  Once HDMI is
+enabled, its last burst of each frame supplies the production frame-done event.
 
 ## Configuration window
 
@@ -84,6 +86,7 @@ The configuration window remains at `0x0300_0000`:
 | `0x14` | R | CPU-visible logical bytes, `0x0040_0000` |
 | `0x18` | R/W | swap status/control |
 | `0x1c` | R | total physical bytes, `0x0080_0000` |
+| `0x20` | R/W | HDMI enable, bit 0 |
 
 `0x18` writes:
 
@@ -116,12 +119,19 @@ The `.psram` linker section is `NOLOAD` and is limited to the logical 4 MiB
 back window.  Firmware cannot directly address the front die; it must request a
 frame-boundary swap first.
 
-## HDMI follow-up
+## HDMI reader
 
-The physical and switcher ports now support 128-byte bursts.  The next stage
-adds a BSRAM-backed asynchronous line FIFO above the HDMI front port and feeds
-these bursts only when at least the requested number of FIFO entries are free.
+The HDMI front-port reader is implemented.  A 640x480 RGB565 frame begins at
+offset zero and occupies 614400 bytes.  It fetches 64 pixels/128 bytes per
+burst, for exactly 4800 bursts per frame, and reserves a whole burst plus a
+small CDC margin before launching.  The 512 x 16 FIFO is an explicit `SDPB`,
+so it consumes one BSRAM rather than about 8192 flip-flops.
+
+The video clock tree is 126.667 MHz serializer `/5` to 25.333 MHz pixel clock.
+With the Tang Nano 800x525 raster this is about 60.3 Hz and about 37.0 MB/s of
+active RGB565 reads.  Each front die has a raw 160 MB/s data rate at 80 MHz DDR.
+
 The GPU placeholder uses the same burst shape on back; its priority over the
-CPU is already enforced at the switcher boundary.  The PHY itself intentionally
-contains no 128-byte buffer, so HDMI and GPU may each use a dedicated BSRAM
-without duplicating storage in every PHY.
+CPU is already enforced at the switcher boundary.  The PHY intentionally
+contains no 128-byte buffer, so the future GPU may add its own BSRAM without
+duplicating storage in every PHY.

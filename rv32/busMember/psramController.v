@@ -13,7 +13,8 @@
 // carries only a low 16-bit value; the bridge serializes/deserializes the two
 // halves while the PHY keeps CS asserted and sends CA only once.  The
 // CPU-to-PHY crossing uses a request/acknowledge toggle with bundled data.
-// Future GPU and HDMI ports are already present in the PHY clock domain.
+// The HDMI port is active; the future GPU port is already present in the PHY
+// clock domain and is currently tied off at the top level.
 //------------------------------------------------------------------------------
 module psramController #(
     parameter integer PHY_FREQ_HZ = 80_000_000,
@@ -54,7 +55,7 @@ module psramController #(
     output wire        gpu_r_last,
     output wire        gpu_done,
 
-    // Future HDMI read-burst port, synchronous to phy_clk and exclusive to
+    // HDMI read-burst port, synchronous to phy_clk and exclusive to
     // the front die.  The reader must reserve cmd_words FIFO entries first.
     input  wire        hdmi_cmd_valid,
     output wire        hdmi_cmd_ready,
@@ -66,6 +67,7 @@ module psramController #(
     output wire        hdmi_done,
     input  wire        hdmi_frame_done,
     output wire        frame_swap_request,
+    output reg         hdmi_enable,
 
     output wire [3:0]  ckPhase,
 
@@ -476,6 +478,7 @@ module psramController #(
             ckPhaseR           <= 4'd5;
             swapReqToggleCpu   <= 1'b0;
             softFrameToggleCpu <= 1'b0;
+            hdmi_enable        <= 1'b0;
         end else begin
             cfg_ready <= cfg_valid;
             if (cfg_valid && !cfg_ready && cfg_wstrb[0]) begin
@@ -487,6 +490,8 @@ module psramController #(
                     if (cfg_wdata[1])
                         softFrameToggleCpu <= ~softFrameToggleCpu;
                 end
+                if (cfg_addr[5:2] == 4'd8)
+                    hdmi_enable <= cfg_wdata[0];
             end
         end
     end
@@ -505,6 +510,7 @@ module psramController #(
             4'd6: cfg_rdata = {swapCountCpu, 12'd0, pendingSyncCpu,
                                backSyncCpu, frontSyncCpu, pendingSyncCpu};
             4'd7: cfg_rdata = 32'h0080_0000; // total physical PSRAM bytes
+            4'd8: cfg_rdata = {31'd0, hdmi_enable};
             default: cfg_rdata = 32'd0;
         endcase
     end

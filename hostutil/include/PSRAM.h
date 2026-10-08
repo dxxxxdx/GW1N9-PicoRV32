@@ -37,6 +37,7 @@ extern uint8_t __psram_end[];
 #define PSRAM_BYTES_REG   (*(volatile uint32_t *)(PSRAM_CFG_BASE + 0x14u))
 #define PSRAM_SWAP_REG    (*(volatile uint32_t *)(PSRAM_CFG_BASE + 0x18u))
 #define PSRAM_PHYS_BYTES_REG (*(volatile uint32_t *)(PSRAM_CFG_BASE + 0x1cu))
+#define PSRAM_HDMI_CTRL_REG (*(volatile uint32_t *)(PSRAM_CFG_BASE + 0x20u))
 
 #define PSRAM_MAGIC_EXPECTED     0x50534231u  // "PSB1": burst-port ABI v1
 #define PSRAM_STATUS_INIT_DONE   (1u << 0)
@@ -55,6 +56,7 @@ extern uint8_t __psram_end[];
 #define PSRAM_SWAP_FRONT_DIE      (1u << 1)
 #define PSRAM_SWAP_BACK_DIE       (1u << 2)
 #define PSRAM_SWAP_HDMI_REQUEST   (1u << 3)
+#define PSRAM_HDMI_ENABLE          (1u << 0)
 
 static inline int PSRAM_Ready(void)
 {
@@ -96,6 +98,11 @@ static inline void PSRAM_RequestSwap(void)
 static inline void PSRAM_TestSwap(void)
 {
     PSRAM_SWAP_REG = PSRAM_SWAP_REQUEST | PSRAM_SWAP_SOFT_FRAME_DONE;
+}
+
+static inline void PSRAM_HDMIEnable(void)
+{
+    PSRAM_HDMI_CTRL_REG = PSRAM_HDMI_ENABLE;
 }
 
 // Writes and verifies words [0, words).  Returns words on success, otherwise

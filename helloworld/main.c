@@ -6,6 +6,8 @@
 #define SWAP_TIMEOUT         1000000u
 #define SWAP_STRESS_WORDS    (16u * 1024u) // 64 KiB checked after every swap
 #define SWAP_STRESS_ROUNDS   256u
+#define HDMI_WIDTH            640u
+#define HDMI_HEIGHT           480u
 
 static void print_result(const char *name, uint32_t got, uint32_t want)
 {
@@ -350,6 +352,27 @@ static uint32_t test_full_die(uint32_t die)
     return bad;
 }
 
+static void draw_hdmi_color_bars(void)
+{
+    static const uint16_t colors[8] = {
+        0xffffu, 0xffe0u, 0x07ffu, 0x07e0u,
+        0xf81fu, 0xf800u, 0x001fu, 0x0000u
+    };
+    volatile uint32_t *frame = PSRAM_U32;
+
+    // Each 32-bit CPU store places two adjacent RGB565 pixels into the single
+    // two-beat physical burst used by the PSRAM bridge.
+    for (uint32_t y = 0u; y < HDMI_HEIGHT; ++y) {
+        uint32_t row = y * (HDMI_WIDTH / 2u);
+        for (uint32_t bar = 0u; bar < 8u; ++bar) {
+            uint32_t packed = (uint32_t)colors[bar] |
+                              ((uint32_t)colors[bar] << 16);
+            for (uint32_t pair = 0u; pair < HDMI_WIDTH / 16u; ++pair)
+                frame[row + bar * (HDMI_WIDTH / 16u) + pair] = packed;
+        }
+    }
+}
+
 int main(void)
 {
     uint32_t status;
@@ -433,7 +456,16 @@ int main(void)
 
     UART_CStr("final swap status=0x");
     UART_Hex32(PSRAM_SWAP_REG);
-    UART_CStr("\r\ndone\r\n");
+    UART_CStr("\r\nrender 640x480 RGB565 color bars...\r\n");
+    select_back_die(0u);
+    draw_hdmi_color_bars();
+    if (swap_back_die()) {
+        PSRAM_HDMIEnable();
+        UART_CStr("HDMI enabled; color-bar die is now front\r\n");
+    } else {
+        UART_CStr("HDMI enable failed: final swap timeout\r\n");
+    }
+    UART_CStr("done\r\n");
     for (;;) {
     }
 }

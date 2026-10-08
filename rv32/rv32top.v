@@ -36,6 +36,11 @@ module rv32top #(
     inout  wire [1:0]  IO_psram_rwds,
     inout  wire [15:0] IO_psram_dq,
 
+    output wire        tmds_clk_n,
+    output wire        tmds_clk_p,
+    output wire [2:0]  tmds_d_n,
+    output wire [2:0]  tmds_d_p,
+
     input  wire        reset_n,
     input  wire        start,
     input  wire        irq_n,
@@ -58,6 +63,17 @@ module rv32top #(
         .lock    (pllLock),
         .clkin   (clock50MHz),
         .psda    (psramCkPhase)
+    );
+
+    // Tang Nano reference HDMI mode: 126.6667 MHz serializer clock and
+    // 25.3333 MHz pixel clock for 640x480 at approximately 60.3 Hz.
+    wire hdmiPixelClk;
+    wire hdmiSerialClk;
+    wire hdmiClockLock;
+    hdmiClock hdmiClocks (
+        .clk40(sysClk), .reset_n(systemReset_n),
+        .pixel_clk(hdmiPixelClk), .serial_clk(hdmiSerialClk),
+        .locked(hdmiClockLock)
     );
 
     // 复位按下只等待两级同步，尽快让系统停下；松开必须稳定满消抖时间。
@@ -358,8 +374,7 @@ module rv32top #(
     // ---------------------------------------------------------------------
     // 内嵌 PSRAM
     // ---------------------------------------------------------------------
-    // GPU 和 HDMI 数据端口先保留在控制器边界。当前版本只让软核访问逻辑
-    // back die；后续模块接入时无需再次改动 PHY 或物理 die 映射。
+    // GPU 端口暂时保留；HDMI DMA 独占逻辑 front die。
     wire gpuPsramReady;
     wire gpuPsramWtake;
     wire [15:0] gpuPsramRdata;
@@ -372,6 +387,39 @@ module rv32top #(
     wire hdmiPsramRlast;
     wire hdmiPsramDone;
     wire frameSwapRequest;
+    wire hdmiEnable;
+    wire hdmiFrameDone;
+    wire hdmiCmdValid;
+    wire [21:0] hdmiCmdAddr;
+    wire [6:0] hdmiCmdWords;
+    wire [15:0] hdmiPixelData;
+    wire hdmiPixelValid;
+    wire hdmiPixelTake;
+    wire hdmiUnderflow;
+
+    // Each HDMI block synchronizes this request into its own clock domain.
+    wire hdmiRunRequest = cpuReset_n && hdmiClockLock && hdmiEnable;
+
+    psramHdmiReader hdmiReader (
+        .phy_clk(psramClk), .pixel_clk(hdmiPixelClk),
+        .reset_n(hdmiRunRequest),
+        .cmd_valid(hdmiCmdValid), .cmd_ready(hdmiPsramReady),
+        .cmd_addr(hdmiCmdAddr), .cmd_words(hdmiCmdWords),
+        .r_data(hdmiPsramRdata), .r_valid(hdmiPsramRvalid),
+        .r_last(hdmiPsramRlast), .cmd_done(hdmiPsramDone),
+        .frame_swap_request(frameSwapRequest), .frame_done(hdmiFrameDone),
+        .pixel_take(hdmiPixelTake), .pixel_data(hdmiPixelData),
+        .pixel_valid(hdmiPixelValid)
+    );
+
+    hdmiTx hdmiOutput (
+        .pixel_clk(hdmiPixelClk), .serial_clk(hdmiSerialClk),
+        .reset_n(hdmiRunRequest),
+        .pixel_data(hdmiPixelData), .pixel_valid(hdmiPixelValid),
+        .pixel_take(hdmiPixelTake), .underflow(hdmiUnderflow),
+        .tmds_clk_n(tmds_clk_n), .tmds_clk_p(tmds_clk_p),
+        .tmds_d_n(tmds_d_n), .tmds_d_p(tmds_d_p)
+    );
 
     psramController #(
         .PHY_FREQ_HZ(PSRAM_CLK_HZ),
@@ -395,12 +443,13 @@ module rv32top #(
         .gpu_r_valid(gpuPsramRvalid), .gpu_r_last(gpuPsramRlast),
         .gpu_done(gpuPsramDone),
 
-        .hdmi_cmd_valid(1'b0), .hdmi_cmd_ready(hdmiPsramReady),
-        .hdmi_cmd_addr(22'd0), .hdmi_cmd_words(7'd1),
+        .hdmi_cmd_valid(hdmiCmdValid), .hdmi_cmd_ready(hdmiPsramReady),
+        .hdmi_cmd_addr(hdmiCmdAddr), .hdmi_cmd_words(hdmiCmdWords),
         .hdmi_r_data(hdmiPsramRdata), .hdmi_r_valid(hdmiPsramRvalid),
         .hdmi_r_last(hdmiPsramRlast), .hdmi_done(hdmiPsramDone),
-        .hdmi_frame_done(1'b0),
+        .hdmi_frame_done(hdmiFrameDone),
         .frame_swap_request(frameSwapRequest),
+        .hdmi_enable(hdmiEnable),
 
         .ckPhase(psramCkPhase),
 
@@ -422,8 +471,7 @@ module rv32top #(
                             gpuPsramWtake, gpuPsramRdata, gpuPsramRvalid,
                             gpuPsramRlast, gpuPsramDone, hdmiPsramReady,
                             hdmiPsramRdata, hdmiPsramRvalid, hdmiPsramRlast,
-                            hdmiPsramDone,
-                            frameSwapRequest};
+                            hdmiPsramDone, hdmiUnderflow};
 endmodule
 
 `default_nettype wire

@@ -136,6 +136,7 @@ module tb_psramController;
     wire hdmi_done;
     reg hdmi_frame_done = 1'b0;
     wire frame_swap_request;
+    wire hdmi_enable;
 
     wire [3:0] phase;
     wire [1:0] ck, ck_n, cs_n, psreset_n;
@@ -160,6 +161,7 @@ module tb_psramController;
         .hdmi_r_last(hdmi_r_last),
         .hdmi_done(hdmi_done), .hdmi_frame_done(hdmi_frame_done),
         .frame_swap_request(frame_swap_request),
+        .hdmi_enable(hdmi_enable),
         .ckPhase(phase), .O_psram_ck(ck), .O_psram_ck_n(ck_n),
         .O_psram_cs_n(cs_n), .O_psram_reset_n(psreset_n),
         .IO_psram_rwds(rwds), .IO_psram_dq(dq)
@@ -308,6 +310,9 @@ module tb_psramController;
         cfg_read(12'h00c, 32'h5053_4231);
         cfg_read(12'h014, 32'h0040_0000);
         cfg_read(12'h01c, 32'h0080_0000);
+        cfg_read(12'h020, 32'd0);
+        cfg_write(12'h020, 32'd1);
+        cfg_read(12'h020, 32'd1);
 
         $display("PASS: logical back window, frame swap, CDC, masks and handshake");
         $finish;
