@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE gowin-fpga-project>
+<Project>
+    <Template>FPGA</Template>
+    <Version>5</Version>
+    <Device name="GW1NR-9C" pn="GW1NR-LV9QN88PC6/I5">gw1nr9c-004</Device>
+    <FileList>
+        <File path="rv32/picorv32/picorv32.v" type="file.verilog" enable="1"/>
+        <File path="rv32/miscmodule/ButtonDebounce.v" type="file.verilog" enable="1"/>
+        <File path="rv32/busMember/UARTRX.v" type="file.verilog" enable="1"/>
+        <File path="rv32/busMember/UARTTX.v" type="file.verilog" enable="1"/>
+        <File path="rv32/busMember/UARTTX_MMIO.v" type="file.verilog" enable="1"/>
+        <File path="rv32/busMember/busManager.v" type="file.verilog" enable="1"/>
+        <File path="rv32/busMember/rv32RegisterRam.v" type="file.verilog" enable="1"/>
+        <File path="rv32/busMember/uartProgramMemory.v" type="file.verilog" enable="1"/>
+        <File path="rv32/busMember/psramPhy.v" type="file.verilog" enable="1"/>
+        <File path="rv32/busMember/psramController.v" type="file.verilog" enable="1"/>
+        <File path="rv32/gowin_rpll.v" type="file.verilog" enable="1"/>
+        <File path="rv32/rv32top.v" type="file.verilog" enable="1"/>
+        <File path="picorv32-1N9.cst" type="file.cst" enable="1"/>
+        <File path="picorv32-1N9.sdc" type="file.sdc" enable="1"/>
+    </FileList>
+</Project>

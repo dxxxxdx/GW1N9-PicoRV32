@@ -7,7 +7,7 @@
 //   0x0000_0000 - 0x0000_3fff : 16 KiB program memory window
 //   0x0000_4000 - 0x0000_7fff : 16 KiB SRAM window
 //   0x0100_0000 - 0x0100_ffff : 64 KiB MMIO window
-//   0x0200_0000 - 0x023f_ffff : 4 MiB PSRAM data window
+//   0x0200_0000 - 0x027f_ffff : 8 MiB PSRAM data window (two 4 MiB banks)
 //   0x0300_0000 - 0x0300_0fff : 4 KiB PSRAM config window
 //
 // Downstream addresses are local byte offsets within the selected window.
@@ -22,7 +22,7 @@ module busManager #(
     parameter [31:0] MMIO_BASE     = 32'h0100_0000,
     parameter [31:0] MMIO_MASK     = 32'hffff_0000,
     parameter [31:0] PSRAM_BASE    = 32'h0200_0000,
-    parameter [31:0] PSRAM_MASK    = 32'hffc0_0000,
+    parameter [31:0] PSRAM_MASK    = 32'hff80_0000,
     parameter [31:0] PSRAMCFG_BASE = 32'h0300_0000,
     parameter [31:0] PSRAMCFG_MASK = 32'hffff_f000,
 
@@ -67,7 +67,7 @@ module busManager #(
     output wire [ 3:0] mmio_wstrb,
     input  wire [31:0] mmio_rdata,
 
-    // PSRAM data target. psram_addr is a byte offset 0x000000 through 0x3fffff.
+    // PSRAM data target. psram_addr is a byte offset 0x000000 through 0x7fffff.
     output wire        psram_valid,
     output wire        psram_instr,
     input  wire        psram_ready,

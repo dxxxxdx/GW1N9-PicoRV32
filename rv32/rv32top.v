@@ -8,9 +8,9 @@
 //   - UART TX 位于 MMIO 0x0100_0000 的前三个字节；
 //   - irq_n 按键经消抖后产生一个时钟周期的脉冲，接到 PicoRV32 的 irq bit 3
 //     （hostutil 里的 IRQ_CH0），固件侧由 IRQ_Ch0_Handler() 处理；
-//   - 50MHz 晶振经 rPLL 倍到 80MHz，整个系统（含 PSRAM PHY）统一跑 80MHz；
-//   - PSRAM 4 MiB 数据窗口 0x0200_0000~0x023f_ffff，当普通内存读写；
-//   - PSRAM 配置窗口 0x0300_0000，放 rdLat / wrLat 和状态；
+//   - 50MHz 晶振经 rPLL 产生 CPU 40MHz、PSRAM PHY 80MHz；
+//   - PSRAM 8 MiB 数据窗口 0x0200_0000~0x027f_ffff，两个 4 MiB die 分 bank；
+//   - PSRAM 诊断窗口 0x0300_0000，提供初始化、PHY 状态和时钟信息；
 //   - 不实例化 SPI Flash。
 //
 // reset_n、start、irq_n 都是低有效物理按键：默认上拉为 1，按下接地为 0。
@@ -18,9 +18,10 @@
 // start 应在最后一个 UART 字节发送完成后再按下。
 module rv32top #(
     // 系统时钟频率。PicoRV32 走 PLL 时钟时 Fmax 只有 ~46MHz（见 gowin_rpll.v
-    // 里的实测对比），所以系统跑 40MHz，PSRAM PHY 也 1:1 跑 40MHz。
-    // 改这个值的时候，gowin_rpll.v 的输出频率和 BUTTON_FILTER_CYCLES 要一起改。
+    // 里的实测对比），所以系统保持 40MHz；PSRAM PHY 独立跑 80MHz。
+    // 改这个值时 BUTTON_FILTER_CYCLES 要一起改。
     parameter integer SYS_CLK_HZ = 40_000_000,
+    parameter integer PSRAM_CLK_HZ = 80_000_000,
     // 50 ms 消抖窗口 = SYS_CLK_HZ / 20；仿真可覆盖成较小值。
     parameter [21:0] BUTTON_FILTER_CYCLES = 22'd2_000_000
 ) (
@@ -42,15 +43,17 @@ module rv32top #(
     output wire        trap
 );
     // ---------------------------------------------------------------- 时钟
-    // 50MHz 晶振 -> 80MHz 系统时钟 + 80MHz 相移时钟（推 PSRAM CK）
+    // 50MHz -> 80MHz PHY + 80MHz/90度 PSRAM CK + 40MHz CPU
     wire       sysClk;
+    wire       psramClk;
     wire       psramClkP;
     wire       pllLock;
-    wire [3:0] psramCkPhase;   // 来自 PSRAM 配置窗口，运行时可调
+    wire [3:0] psramCkPhase;   // 上电为4，固件训练后驱动rPLL动态相位
 
     Gowin_rPLL sysPll (
-        .clkout  (sysClk),
+        .clkout  (psramClk),
         .clkoutp (psramClkP),
+        .clkoutd (sysClk),
         .lock    (pllLock),
         .clkin   (clock50MHz),
         .psda    (psramCkPhase)
@@ -201,6 +204,8 @@ module rv32top #(
         .ENABLE_REGS_DUALPORT(1),
         .TWO_STAGE_SHIFT(1),
         .BARREL_SHIFTER(0),
+        .TWO_CYCLE_COMPARE(1),
+        .TWO_CYCLE_ALU(1),
         .COMPRESSED_ISA(0),
         .CATCH_MISALIGN(1),
         .CATCH_ILLINSN(1),
@@ -352,8 +357,12 @@ module rv32top #(
     // ---------------------------------------------------------------------
     // 内嵌 PSRAM
     // ---------------------------------------------------------------------
-    psramController psram (
-        .clk(sysClk), .clk_p(psramClkP), .reset_n(cpuReset_n),
+    psramController #(
+        .PHY_FREQ_HZ(PSRAM_CLK_HZ),
+        .LATENCY(3)
+    ) psram (
+        .clk(sysClk), .phy_clk(psramClk), .clk_p(psramClkP),
+        .reset_n(cpuReset_n),
 
         .mem_valid(psram_valid), .mem_ready(psram_ready),
         .mem_addr(psram_addr), .mem_wdata(psram_wdata),

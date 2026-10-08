@@ -1,6 +1,9 @@
 # Local build output
 /build/
 /cmake-build-*/
+/impl/
+/*.gprj.user
+/.user
 
 # IDE state
 /.idea/

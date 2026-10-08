@@ -1,237 +1,266 @@
-//
-// PSRAM 低速口 bring-up
-//
-// 上一版把 msg[] 声明成了 `PSRAM unsigned char msg[6]`，也就是放进了 .psram
-// 段（0x02000000）。于是"要打印的内容"本身就来自还没校准的 PSRAM，串口上
-// 自然全是乱码 —— 那不是 UART 的问题。
-//
-// 这一版把缓冲区放回普通 BSRAM，先做真正的对齐扫描：
-//   rdLat / wrLat 是"CA 结束之后 FSM 额外等几拍才进数据段"，代码里给的默认值
-//   是按 CR0 固定延迟 6 拍推出来的，真机上必须扫。
-//
-
 #include "PSRAM.h"
 #include "UART.h"
 #include "IRQ.h"
 
-/* 必须放 BSRAM：PSRAM 没调好之前，连"要打印什么"都读不出来。 */
-static uint8_t msg[6];
+#define TRAIN_WORDS_PER_BANK (32u * 1024u) // 128 KiB per die and pattern
 
-/* 扫描用的图案。地址 0 对齐到 128 字节，不会跨 burst 边界。 */
-#define PATTERN 0x12345678u
-
-static void PrintStatus(void)
+static void print_result(const char *name, uint32_t got, uint32_t want)
 {
-    uint32_t status = PSRAM_STATUS_REG;
+    UART_CStr(name);
+    UART_CStr(": got=0x");
+    UART_Hex32(got);
+    UART_CStr(" want=0x");
+    UART_Hex32(want);
+    UART_CStr(got == want ? "  OK\r\n" : "  FAIL\r\n");
+}
 
+static void phase_settle(void)
+{
+    // Dynamic PSDA is asynchronous to the CPU bus.  Transactions are already
+    // quiescent here; leave several microseconds for CLKOUTP to settle before
+    // asserting either PSRAM chip select again.
+    for (volatile uint32_t i = 0u; i < 512u; ++i)
+        __asm__ volatile ("nop");
+}
+
+static uint32_t training_pattern(uint32_t index, uint32_t seed)
+{
+    uint32_t x = index ^ (index << 16) ^ (index << 7) ^ (index >> 3);
+    return seed ^ x;
+}
+
+static uint32_t probeFailure;
+
+static uint32_t probe_bank(volatile uint32_t *mem, uint32_t seed)
+{
+    for (uint32_t i = 0u; i < TRAIN_WORDS_PER_BANK; ++i)
+        mem[i] = training_pattern(i, seed);
+
+    for (uint32_t i = 0u; i < TRAIN_WORDS_PER_BANK; ++i) {
+        if (mem[i] != training_pattern(i, seed))
+            return i;
+    }
+    return TRAIN_WORDS_PER_BANK;
+}
+
+static int probe_phase(uint32_t phase)
+{
+    volatile uint32_t *bank0 = (volatile uint32_t *)PSRAM_BANK0_BASE;
+    volatile uint32_t *bank1 = (volatile uint32_t *)PSRAM_BANK1_BASE;
+    uint32_t bad;
+
+    probeFailure = 0u;
+    PSRAM_SetPhase(phase);
+    phase_settle();
+    if (PSRAM_PHASE_REG != phase) {
+        probeFailure = 0x10000000u | PSRAM_PHASE_REG;
+        return 0;
+    }
+
+    // A phase is usable only if both physical dies pass two complementary
+    // address-dependent patterns.  This catches bad upper and lower DDR bytes.
+    bad = probe_bank(bank0, 0xa55a5aa5u);
+    if (bad != TRAIN_WORDS_PER_BANK) {
+        probeFailure = 0x01000000u | bad;
+        return 0;
+    }
+    bad = probe_bank(bank1, 0x5aa5a55au);
+    if (bad != TRAIN_WORDS_PER_BANK) {
+        probeFailure = 0x02000000u | bad;
+        return 0;
+    }
+    bad = probe_bank(bank0, 0x5aa5a55au);
+    if (bad != TRAIN_WORDS_PER_BANK) {
+        probeFailure = 0x03000000u | bad;
+        return 0;
+    }
+    bad = probe_bank(bank1, 0xa55a5aa5u);
+    if (bad != TRAIN_WORDS_PER_BANK) {
+        probeFailure = 0x04000000u | bad;
+        return 0;
+    }
+    return 1;
+}
+
+static uint32_t choose_window_center(uint32_t passMask)
+{
+    uint32_t bestLength = 0u;
+    uint32_t bestEnd = 0u;
+    uint32_t length = 0u;
+
+    // Search two copies because tap 15 and tap 0 are adjacent phases.  Cap a
+    // run at 16 so an all-pass mask still has a well-defined center.
+    for (uint32_t i = 0u; i < 32u; ++i) {
+        if ((passMask & (1u << (i & 15u))) != 0u) {
+            if (length < 16u)
+                ++length;
+            if (length > bestLength) {
+                bestLength = length;
+                bestEnd = i;
+            }
+        } else {
+            length = 0u;
+        }
+    }
+
+    if (bestLength == 0u)
+        return 4u;
+    return (bestEnd + 1u - bestLength + bestLength / 2u) & 15u;
+}
+
+static uint32_t train_phase(void)
+{
+    uint32_t passMask = 0u;
+
+    UART_CStr("phase training (two dies, 16 taps):\r\n");
+    for (uint32_t phase = 0u; phase < 16u; ++phase) {
+        int pass = probe_phase(phase);
+        if (pass)
+            passMask |= 1u << phase;
+        UART_CStr("  phase ");
+        UART_UInt(phase);
+        if (pass) {
+            UART_CStr(": PASS\r\n");
+        } else {
+            UART_CStr(": FAIL code=0x");
+            UART_Hex32(probeFailure);
+            UART_CStr("\r\n");
+        }
+    }
+
+    uint32_t selected = choose_window_center(passMask);
+    UART_CStr("phase pass mask=0x");
+    UART_Hex32(passMask);
+    UART_CStr(" selected=");
+    UART_UInt(selected);
+    UART_CStr(passMask == 0u ? "  NO WINDOW\r\n" : "  WINDOW CENTER\r\n");
+
+    PSRAM_SetPhase(selected);
+    phase_settle();
+    return selected;
+}
+
+static uint32_t test_boundaries(void)
+{
+    static const uint32_t offsets[] = {
+        0x000000u, 0x000004u, 0x000100u,
+        0x0ffffcu, 0x100000u, 0x1ffffcu,
+        0x200000u, 0x2ffffcu, 0x300000u, 0x3ffffcu,
+        0x400000u, 0x400004u, 0x4ffffcu, 0x500000u,
+        0x5ffffcu, 0x600000u, 0x6ffffcu, 0x700000u, 0x7ffffcu
+    };
+    uint32_t failures = 0u;
+
+    for (uint32_t i = 0u; i < sizeof(offsets) / sizeof(offsets[0]); ++i) {
+        volatile uint32_t *p = (volatile uint32_t *)(PSRAM_BASE + offsets[i]);
+        *p = 0x6d3a0000u ^ offsets[i] ^ i;
+    }
+
+    for (uint32_t i = 0u; i < sizeof(offsets) / sizeof(offsets[0]); ++i) {
+        volatile uint32_t *p = (volatile uint32_t *)(PSRAM_BASE + offsets[i]);
+        uint32_t want = 0x6d3a0000u ^ offsets[i] ^ i;
+        if (*p != want)
+            ++failures;
+    }
+    return failures;
+}
+
+static uint32_t test_byte_lanes(void)
+{
+    volatile uint32_t *word = PSRAM_U32;
+    volatile uint16_t *half = PSRAM_U16;
+    volatile uint8_t *byte = PSRAM_U8;
+    uint32_t failures = 0u;
+
+    *word = 0x11223344u;
+    byte[0] = 0xa0u;
+    if (*word != 0x112233a0u) ++failures;
+    byte[1] = 0xb1u;
+    if (*word != 0x1122b1a0u) ++failures;
+    byte[2] = 0xc2u;
+    if (*word != 0x11c2b1a0u) ++failures;
+    byte[3] = 0xd3u;
+    if (*word != 0xd3c2b1a0u) ++failures;
+
+    half[0] = 0x5aa5u;
+    if (*word != 0xd3c25aa5u) ++failures;
+    half[1] = 0xa55au;
+    if (*word != 0xa55a5aa5u) ++failures;
+
+    return failures;
+}
+
+int main(void)
+{
+    uint32_t status;
+    uint32_t bad;
+    uint32_t boundaryFailures;
+    uint32_t laneFailures;
+    uint32_t selectedPhase;
+
+    IRQ_Init();
+    IRQ_Enable(IRQ_CH0);
+
+    UART_CStr("\r\n=== PSRAM 8 MiB dual-bank test ===\r\n");
+    UART_CStr("PHY: 80 MHz / two x8 dies / fixed 2x latency\r\n");
+
+    UART_CStr("MAGIC  = 0x");
+    UART_Hex32(PSRAM_MAGIC_REG);
+    UART_CStr(PSRAM_MAGIC_REG == PSRAM_MAGIC_EXPECTED ? "  OK\r\n" :
+                                                       "  WRONG BITSTREAM\r\n");
+
+    status = PSRAM_STATUS_REG;
     UART_CStr("STATUS = 0x");
     UART_Hex32(status);
     UART_CStr("  initDone=");
     UART_UInt(status & PSRAM_STATUS_INIT_DONE);
     UART_CStr(" phyBusy=");
-    UART_UInt((status >> 1) & 1u);
+    UART_UInt((status & PSRAM_STATUS_PHY_BUSY) != 0u);
+    UART_CStr(" die0=");
+    UART_UInt((status & PSRAM_STATUS_DIE0_READY) != 0u);
+    UART_CStr(" die1=");
+    UART_UInt((status & PSRAM_STATUS_DIE1_READY) != 0u);
     UART_CStr("\r\n");
-}
 
-static void ScanLatency(void)
-{
-    uint32_t total = 0u;
-    uint32_t cp;
-    uint32_t rd;
-    uint32_t wr;
+    print_result("power-up phase", PSRAM_PHASE_REG, 4u);
 
-    /*
-     * 三个旋钮里 CK 相位最要紧：rdLat 只能挪整拍，相位不对时怎么挪都对不上。
-     * 所以外层扫相位，内层扫两个延迟。
-     *
-     * 相位改的是 rPLL 的 PSDA 输入，只影响 CLKOUTP（PSRAM 的 CK），
-     * 不影响 CPU 跑的 CLKOUT，所以中途改相位不会把核弄死。
-     */
-    for (cp = 0u; cp < 16u; ++cp) {
-        uint32_t hits = 0u;
+    selectedPhase = train_phase();
+    print_result("trained phase", PSRAM_PHASE_REG, selectedPhase);
 
-        PSRAM_SetCkPhase(cp);
-        for (volatile int d = 0; d < 5000; ++d) {
+    laneFailures = test_byte_lanes();
+    UART_CStr("byte/halfword lanes: failures=");
+    UART_UInt(laneFailures);
+    UART_CStr(laneFailures == 0u ? "  OK\r\n" : "  FAIL\r\n");
+
+    boundaryFailures = test_boundaries();
+    UART_CStr("8 MiB / bank boundaries: failures=");
+    UART_UInt(boundaryFailures);
+    UART_CStr(boundaryFailures == 0u ? "  OK\r\n" : "  FAIL\r\n");
+
+    UART_CStr("full 8 MiB write/read test...\r\n");
+    bad = PSRAM_TestPattern(PSRAM_SIZE / sizeof(uint32_t));
+    if (bad == PSRAM_SIZE / sizeof(uint32_t)) {
+        UART_CStr("full 8 MiB: PASS\r\n");
+    } else {
+        UART_CStr("full 8 MiB: FAIL at byte offset 0x");
+        UART_Hex32(bad * sizeof(uint32_t));
+        UART_CStr(" want=0x");
+        UART_Hex32(0xa5a50000u ^ bad);
+        UART_CStr("\r\nrereads:");
+        for (uint32_t i = 0u; i < 8u; ++i) {
+            UART_CStr(" 0x");
+            UART_Hex32(PSRAM_U32[bad]);
         }
-
-        UART_CStr("ckp=");
-        UART_UInt(PSRAM_GetCkPhase());
-        UART_CStr(" ");
-
-        for (wr = 0u; wr < 64u; ++wr) {
-            for (rd = 0u; rd < 64u; ++rd) {
-                PSRAM_SetLatency(rd, wr);
-                PSRAM_U32[0] = PATTERN;
-                if (PSRAM_U32[0] == PATTERN) {
-                    ++hits;
-                    if (hits <= 2u) {
-                        UART_CStr("OK(rd=");
-                        UART_UInt(rd);
-                        UART_CStr(",wr=");
-                        UART_UInt(wr);
-                        UART_CStr(") ");
-                    }
-                }
-            }
-        }
-
-        UART_CStr("hits=");
-        UART_UInt(hits);
-        UART_CStr("\r\n");
-
-        total += hits;
-    }
-
-    UART_CStr("total=");
-    UART_UInt(total);
-    UART_CStr("\r\n");
-}
-
-int main(void)
-{
-    IRQ_Init();
-    IRQ_Enable(IRQ_CH0);
-
-    UART_CStr("\r\n=== PSRAM bring-up ===\r\n");
-    /* 版本戳：位流和固件各一个，对不上就别往下看数据了 */
-    UART_CStr("fw v9 / cr0-write-readback\r\n");
-    UART_CStr("BSMAGIC = 0x");
-    UART_Hex32(PSRAM_MAGIC_REG);
-    UART_CStr("  expect 0x");
-    UART_Hex32(PSRAM_MAGIC_EXPECTED);
-    UART_CStr((PSRAM_MAGIC_REG == PSRAM_MAGIC_EXPECTED) ? "  OK\r\n"
-                                                         : "  <<< 旧位流!\r\n");
-    PrintStatus();
-
-    /* 探针 1：clk_p（PSRAM CK 的源时钟）到底有没有在跑。
-     * 读两次，变了才说明 PLL 的 CLKOUTP 是活的；一直不变就是 CK 没出去，
-     * 那 CA 再对也没用。 */
-    {
-        uint32_t a = PSRAM_CKPCNT_REG;
-        for (volatile int d = 0; d < 2000; ++d) {
-        }
-        uint32_t b = PSRAM_CKPCNT_REG;
-        UART_CStr("CKPCNT a=0x");
-        UART_Hex32(a);
-        UART_CStr(" b=0x");
-        UART_Hex32(b);
-        UART_CStr((a != b) ? "  CLK_P ALIVE\r\n" : "  <<< CLK_P DEAD!\r\n");
-    }
-
-    /* 探针 2：读 CR0。器件正常应答时应该是 0x8F8FEFEF（两个 die 各回 0x8FEF）。
-     * 全 0 / 全 F 就是器件压根没答应。 */
-    UART_CStr("CR0 sweep rd=0..63 (want 0x8FA28FA2 或 0x8FEF8FEF):\r\n");
-    for (uint32_t rd = 0u; rd < 64u; ++rd) {
-        uint32_t got;
-        PSRAM_SetLatency(rd, 4u);
-        PSRAM_ReadCR0();
-        for (volatile int d = 0; d < 500; ++d) {
-        }
-        got = PSRAM_REGRD_DATA_REG;
-        if (got != 0u && got != 0xFFFFFFFFu) {
-            UART_CStr("  rd=");
-            UART_UInt(rd);
-            UART_CStr(" -> 0x");
-            UART_Hex32(got);
-            UART_CStr("\r\n");
-        }
-    }
-    UART_CStr("(only non-0 / non-F shown)\r\n");
-
-    /* 先把 DQ 原始读数打出来：ckp=0 固定，rd 逐值扫。
-     * 这 16 行就是一次读事务的 DQ 时间线，能直接看出器件有没有响应。 */
-    PSRAM_SetCkPhase(0);
-    PSRAM_SetLatency(6, 4);
-    /* 决定性实验：写几个不同的合法 CR0 值，看回读跟不跟着变。
-     * 跟着变 -> 写+读链路通，只是之前写的值不对；
-     * 不变   -> 写根本没进去（或读的不是 CR0）。 */
-    {
-        static const uint16_t kCr0[] = {0x8FEFu, 0x8F2Fu, 0x8F0Fu, 0x8FFFu};
-        UART_CStr("CR0 write -> read @ckp=4 rd=20:\r\n");
-        PSRAM_SetCkPhase(4u);
-        for (unsigned i = 0u; i < 4u; ++i) {
-            PSRAM_WriteCR0(kCr0[i]);
-            for (volatile int d = 0; d < 800; ++d) {
-            }
-            PSRAM_SetLatency(20u, 4u);
-            PSRAM_ReadCR0();
-            for (volatile int d = 0; d < 800; ++d) {
-            }
-            UART_CStr("  wr=0x");
-            UART_Hex32(kCr0[i]);
-            UART_CStr(" -> rd=0x");
-            UART_Hex32(PSRAM_REGRD_DATA_REG);
-            UART_CStr("\r\n");
-        }
-    }
-
-    /* 关键实验：在"已经能采到确定值"的采样点上单独扫 CK 相位。
-     * 之前的 ckp 扫描要求整条写+读链路同时对上，太苛刻；这里只动相位，
-     * 采样点固定在 rd=20（CR0 扫描里 0x8FA2 反复出现的位置）。 */
-    UART_CStr("ckp sweep, CR0 @rd=20 (want 0x8FEF8FEF):\r\n");
-    for (uint32_t ckp = 0u; ckp < 16u; ++ckp) {
-        PSRAM_SetCkPhase(ckp);
-        for (volatile int d = 0; d < 2000; ++d) {
-        }
-        PSRAM_SetLatency(20u, 4u);
-        PSRAM_ReadCR0();
-        for (volatile int d = 0; d < 500; ++d) {
-        }
-        UART_CStr("  ckp=");
-        UART_UInt(ckp);
-        UART_CStr(" -> 0x");
-        UART_Hex32(PSRAM_REGRD_DATA_REG);
         UART_CStr("\r\n");
     }
-
-    UART_CStr("ckp sweep, mem read @rd=16 (want 0x12345678):\r\n");
-    for (uint32_t ckp = 0u; ckp < 16u; ++ckp) {
-        uint32_t got;
-        PSRAM_SetCkPhase(ckp);
-        for (volatile int d = 0; d < 2000; ++d) {
-        }
-        PSRAM_SetLatency(16u, 4u);
-        PSRAM_U32[0] = PATTERN;
-        got = PSRAM_U32[0];
-        UART_CStr("  ckp=");
-        UART_UInt(ckp);
-        UART_CStr(" -> 0x");
-        UART_Hex32(got);
-        UART_CStr((got == PATTERN) ? "  <<< MATCH\r\n" : "\r\n");
-    }
-
-    PSRAM_SetCkPhase(4u);
-
-    UART_CStr("scan ckp x rd x wr:\r\n");
-    ScanLatency();
 
     UART_CStr("done\r\n");
-
-    /* 心跳：确认 main 之后核还活着，顺便覆盖 UART_String 的用法 */
-    for (int i = 0; i < 6; ++i)
-        msg[i] = '0';
-    msg[3] = '\r';
-    msg[4] = '\n';
-
     for (;;) {
-        for (volatile int i = 0; i < 400000; ++i) {
-        }
-
-        UART_String(msg, 5);
-
-        if (++msg[2] > '9') {
-            msg[2] = '0';
-            if (++msg[1] > '9') {
-                msg[1] = '0';
-                if (++msg[0] > '9')
-                    msg[0] = '0';
-            }
-        }
     }
 }
 
-const uint8_t ch0msg[] = "CH0 trigged!";
+const uint8_t ch0msg[] = "CH0 triggered!";
 void IRQ_Ch0_Handler(void)
 {
-    UART_String(ch0msg, 13);
+    UART_String(ch0msg, 14);
 }

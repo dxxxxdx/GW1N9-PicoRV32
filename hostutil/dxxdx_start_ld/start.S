@@ -72,7 +72,7 @@ _start:
     j       .Lclear_bss
 
     /*
-     * 等 PSRAM 控制器上电完成：cpuReset_n 放开后它要等 250us(tRPU 150us)
+     * 等两路 PSRAM PHY 上电完成：cpuReset_n 放开后先等待 160us(tRPU 150us)
      * 再写一次 CR0 才算初始化好。这期间读状态寄存器是安全的，碰数据窗口
      * 只会把总线卡住——虽然结果一样，但在这里等掉，main 里的第一次访问
      * 就不会看起来像死机。

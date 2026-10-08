@@ -2,38 +2,29 @@
 `default_nettype none
 
 //------------------------------------------------------------------------------
-// psramController.v  --  PSRAM 低速口（随机 32bit 访问）
+// PicoRV32 bridge for both embedded PSRAM dies.
 //
-// 挂在 busManager 的 psram_* 端口上，把 PicoRV32 的一次 native 访问翻译成
-// 一次 PSRAM 事务：
+// CPU side: 40 MHz PicoRV32 native memory bus.
+// PHY side: 80 MHz, two independent x8 PSRAM dies.
 //
-//   CPU 的 4 字节窗口    -> PSRAM 一个 32bit 字（1 拍数据）
-//   mem_wstrb            -> RWDS 字节掩码（sb/sh/sw 全支持，读写双向）
-//   mem_addr[1:0]        -> 字节通道，由 PicoRV32 自己在读回时抽取
+// Address map inside this block:
+//   0x000000-0x3fffff -> die 0 (future front/back framebuffer bank)
+//   0x400000-0x7fffff -> die 1 (future front/back framebuffer bank)
 //
-// 地址：访问永远对齐到 32bit，所以 sb 到奇数地址也只搬一个 4 字节窗口，
-// 靠掩码只改一个字节。
-//
-// 上电序列：等 ~410us（>tRPU 150us）-> 写一次 CR0 -> 才允许 CPU 访问。
-//
-// 配置窗口（busManager 的 psramcfg_*，局部地址 12bit）：
-//   0x000  CFG     [5:0] rdLat   [13:8] wrLat     （默认 6 / 4，范围 0~63）
-//   0x004  STATUS  [0] initDone  [1] phyBusy
-//   0x008  CKPHASE [3:0] PSRAM CK 相移（直连 rPLL.PSDA，默认 4）
-//
-// !!! rdLat / wrLat / CKPHASE 三个都要上板扫 !!!
-// rdLat/wrLat 是"CA 结束之后 FSM 额外等几拍"，CKPHASE 决定采样点落在数据眼
-// 的什么位置。前两个只挪整拍，相位不对时怎么挪都对不上，所以必须先扫相位。
+// Each die transfers a 16-bit word per non-burst transaction.  A 32-bit CPU
+// access is split into low/high halfwords on the selected die.  The clock-domain
+// crossing uses a request/acknowledge toggle with bundled data: request fields
+// stay stable until the response has crossed back to the CPU clock domain.
 //------------------------------------------------------------------------------
 module psramController #(
-    // 上电等待拍数，80MHz 下 20000 拍 = 250us（tRPU 要求 150us）
-    parameter integer PWRUP_CYCLES = 20000
-)(
-    input  wire        clk,          // 80MHz
-    input  wire        clk_p,        // 相移时钟
+    parameter integer PHY_FREQ_HZ = 80_000_000,
+    parameter integer LATENCY = 3
+) (
+    input  wire        clk,
+    input  wire        phy_clk,
+    input  wire        clk_p,
     input  wire        reset_n,
 
-    // 数据窗口：busManager 已把 0x0200_0000 减掉，这里是 4MiB 内偏移
     input  wire        mem_valid,
     output reg         mem_ready,
     input  wire [31:0] mem_addr,
@@ -41,7 +32,6 @@ module psramController #(
     input  wire [ 3:0] mem_wstrb,
     output reg  [31:0] mem_rdata,
 
-    // 配置窗口
     input  wire        cfg_valid,
     output reg         cfg_ready,
     input  wire [11:0] cfg_addr,
@@ -49,10 +39,8 @@ module psramController #(
     input  wire [ 3:0] cfg_wstrb,
     output reg  [31:0] cfg_rdata,
 
-    // PSRAM CK 相移，直接接到 rPLL 的 PSDA 输入
     output wire [3:0]  ckPhase,
 
-    // PSRAM 物理层
     output wire [1:0]  O_psram_ck,
     output wire [1:0]  O_psram_ck_n,
     output wire [1:0]  O_psram_cs_n,
@@ -60,257 +48,317 @@ module psramController #(
     inout  wire [1:0]  IO_psram_rwds,
     inout  wire [15:0] IO_psram_dq
 );
-    // ------------------------------------------------------------ 配置寄存器
-    reg [5:0] rdLat    = 6'd6;
-    reg [5:0] wrLat    = 6'd4;
-    reg [3:0] ckPhaseR = 4'd4;      // CK 相移，DYN_DA_EN=true 时喂给 rPLL.PSDA
-    reg       initDone = 1'b0;
+    localparam [1:0] C_IDLE = 2'd0,
+                     C_WAIT = 2'd1,
+                     C_RESP = 2'd2;
 
+    localparam [2:0] P_WAIT_INIT = 3'd0,
+                     P_IDLE      = 3'd1,
+                     P_LOW_WAIT  = 3'd2,
+                     P_HIGH_WAIT = 3'd3;
+
+    // Power up at the previously proven 90-degree setting, then allow firmware
+    // to move CLKOUTP through the 16 rPLL phase taps while the PHY is idle.
+    // This is intentionally a CPU-domain register: the Gowin rPLL PSDA input
+    // is an asynchronous dynamic-control input, not a clocked bus.
+    reg [3:0] ckPhaseR = 4'd4;
     assign ckPhase = ckPhaseR;
 
-    // ---- 诊断 1：clk_p（PSRAM CK 的源时钟）到底有没有在跑 ----
-    // 固件读两次比较，变了就说明 PLL 的 CLKOUTP 是活的。
-    reg [31:0] ckpCnt = 32'd0;
-    always @(posedge clk_p) ckpCnt <= ckpCnt + 32'd1;
+    // ---------------------------------------------------------------- CPU side
+    // Bundled request data.  These registers remain unchanged from the request
+    // toggle until the PHY response has returned.
+    reg [1:0]  cpuState;
+    reg [22:0] reqAddrCpu;
+    reg [31:0] reqWdataCpu;
+    reg [3:0]  reqWstrbCpu;
+    reg        reqToggleCpu;
 
-    reg [15:0] ckpCntMeta = 16'd0, ckpCntSync = 16'd0;
-    always @(posedge clk) begin
-        ckpCntMeta <= ckpCnt[31:16];
-        ckpCntSync <= ckpCntMeta;
-    end
+    reg ackMetaCpu;
+    reg ackSyncCpu;
+    reg ackSeenCpu;
 
-    // ---- 诊断 2：读 CR0，验证器件到底答不答应 ----
-    // 写 0x014 触发一次寄存器读，结果在 0x018。
-    // 如果 CR0 从来没被写进去，读回来会是器件默认值；如果器件完全不响应，
-    // 读回来会全 0/全 F。
-    reg        doRegRd   = 1'b0;    // 只由配置块驱动
-    reg        regRdStart;          // 只由主 FSM 驱动，通知配置块可以清了
-    reg        txRegRd   = 1'b0;
-    reg [31:0] regRdData = 32'd0;
+    // Response data is written in the PHY domain before ackTogglePhy changes
+    // and remains stable until the next request completes.
+    reg [31:0] respDataPhy;
+    reg        ackTogglePhy;
 
-    // ---- 诊断 3：可配置的 CR0 写值，用来验证"写进去再读回来" ----
-    reg [15:0] cr0Value  = 16'h8FEF;
-    reg        doRegWr   = 1'b0;
-    reg        regWrStart;
-
-    // ------------------------------------------------------------ 上电等待
-    reg [15:0] pwrCnt = 16'd0;
-
-    always @(posedge clk) begin
-        if (!reset_n) pwrCnt <= 16'd0;
-        else if (pwrCnt != PWRUP_CYCLES[15:0]) pwrCnt <= pwrCnt + 16'd1;
-    end
-
-    wire pwrOk = (pwrCnt == PWRUP_CYCLES[15:0]);
-
-    // ------------------------------------------------------------ 主状态机
-    localparam [2:0] S_PWR  = 3'd0,
-                     S_CFG  = 3'd1,
-                     S_IDLE = 3'd2,
-                     S_RUN  = 3'd3,
-                     S_RESP = 3'd4;
-
-    reg [2:0]  st;
-    reg        cfgStarted;
-    reg        phyStart;
-
-    // 事务参数在启动那一刻锁存，整笔事务期间保持不变
-    reg        txWr;
-    reg        txRegWr;
-    reg [20:0] txAddr;
-    reg [3:0]  txMask;
-    reg [31:0] txDin;
-
-    reg [31:0] rdCapture;
-
-    wire phyBusy;
-    wire phyDone;
-    wire [31:0] phyDout;
-    wire        phyDoutWr;
+    wire initDoneCpu;
 
     always @(posedge clk) begin
         mem_ready  <= 1'b0;
-        phyStart   <= 1'b0;
-        regRdStart <= 1'b0;
-        regWrStart <= 1'b0;
+        ackMetaCpu <= ackTogglePhy;
+        ackSyncCpu <= ackMetaCpu;
 
         if (!reset_n) begin
-            st         <= S_PWR;
-            cfgStarted <= 1'b0;
-            initDone   <= 1'b0;
-            txWr       <= 1'b0;
-            txRegWr    <= 1'b0;
-            txRegRd    <= 1'b0;
-            regRdStart <= 1'b0;
-            regWrStart <= 1'b0;
-            txAddr     <= 21'd0;
-            txMask     <= 4'hF;
-            txDin      <= 32'd0;
-            mem_rdata  <= 32'd0;
-            rdCapture  <= 32'd0;
+            cpuState     <= C_IDLE;
+            reqAddrCpu   <= 23'd0;
+            reqWdataCpu  <= 32'd0;
+            reqWstrbCpu  <= 4'd0;
+            reqToggleCpu <= 1'b0;
+            ackMetaCpu   <= 1'b0;
+            ackSyncCpu   <= 1'b0;
+            ackSeenCpu   <= 1'b0;
+            mem_rdata    <= 32'd0;
         end else begin
-            case (st)
-
-            // ------------------------------------------------------ 等 tRPU
-            S_PWR: begin
-                if (pwrOk) begin
-                    st         <= S_CFG;
-                    cfgStarted <= 1'b0;
+            case (cpuState)
+                C_IDLE: begin
+                    if (mem_valid && initDoneCpu) begin
+                        reqAddrCpu   <= mem_addr[22:0];
+                        reqWdataCpu  <= mem_wdata;
+                        reqWstrbCpu  <= mem_wstrb;
+                        reqToggleCpu <= ~reqToggleCpu;
+                        cpuState     <= C_WAIT;
+                    end
                 end
-            end
 
-            // -------------------------------------------------- 写一次 CR0
-            S_CFG: begin
-                if (!cfgStarted) begin
-                    cfgStarted <= 1'b1;
-                    phyStart   <= 1'b1;
-                    txWr       <= 1'b1;
-                    txRegWr    <= 1'b1;
-                    txAddr     <= 21'd0;
-                    txMask     <= 4'b0000;
-                    txDin      <= 32'd0;
-                end else if (phyDone) begin
-                    initDone <= 1'b1;
-                    st       <= S_IDLE;
+                C_WAIT: begin
+                    if (ackSyncCpu != ackSeenCpu) begin
+                        mem_rdata  <= respDataPhy;
+                        ackSeenCpu <= ackSyncCpu;
+                        cpuState   <= C_RESP;
+                    end
                 end
-            end
 
-            // ---------------------------------------------------------- 空闲
-            S_IDLE: begin
-                txRegWr <= 1'b0;
-                txRegRd <= 1'b0;
-
-                if (doRegRd) begin
-                    regRdStart <= 1'b1;
-                    txWr     <= 1'b0;
-                    txRegRd  <= 1'b1;
-                    txAddr   <= 21'd0;
-                    txMask   <= 4'hF;
-                    txDin    <= 32'd0;
-                    phyStart <= 1'b1;
-                    st       <= S_RUN;
-                end else if (doRegWr) begin
-                    regWrStart <= 1'b1;
-                    txWr     <= 1'b1;
-                    txRegWr  <= 1'b1;
-                    txAddr   <= 21'd0;
-                    txMask   <= 4'b0000;
-                    txDin    <= 32'd0;
-                    phyStart <= 1'b1;
-                    st       <= S_RUN;
-                end else if (mem_valid) begin
-                    txWr   <= (mem_wstrb != 4'b0000);
-                    txAddr <= {mem_addr[21:2], 1'b0};   // 对齐到 32bit
-                    txMask <= ~mem_wstrb;               // RWDS: 1 = 不写
-                    txDin  <= mem_wdata;
-                    phyStart <= 1'b1;
-                    st     <= S_RUN;
+                C_RESP: begin
+                    // Hold ready until the PicoRV32 master releases valid; this
+                    // prevents the just-finished transfer from being replayed.
+                    if (mem_valid)
+                        mem_ready <= 1'b1;
+                    else
+                        cpuState <= C_IDLE;
                 end
-            end
 
-            // ------------------------------------------------------ 事务进行
-            S_RUN: begin
-                if (phyDoutWr) rdCapture <= phyDout;
-                if (phyDone) begin
-                    if (txRegRd)      regRdData <= rdCapture;
-                    else if (!txWr)   mem_rdata <= rdCapture;
-                    st <= S_RESP;
-                end
-            end
-
-            // ------------------------------------------------------ 回 ready
-            S_RESP: begin
-                mem_ready <= 1'b1;
-                st        <= S_IDLE;
-            end
-
-            default: st <= S_PWR;
+                default: cpuState <= C_IDLE;
             endcase
         end
     end
 
-    // ------------------------------------------------------------ 配置窗口
-    always @(posedge clk) begin
-        cfg_ready <= 1'b0;
+    // --------------------------------------------------------------- PHY reset
+    // Synchronous assertion/deassertion in the 80 MHz domain.  Initial values
+    // keep both embedded dies reset while the PLL and CPU reset logic settle.
+    reg [2:0] phyResetPipe = 3'b000;
+    always @(posedge phy_clk)
+        phyResetPipe <= {phyResetPipe[1:0], reset_n};
+    wire phyReset_n = phyResetPipe[2];
 
-        if (!reset_n) begin
-            rdLat    <= 6'd6;
-            wrLat    <= 6'd4;
-            ckPhaseR <= 4'd4;
-            doRegRd  <= 1'b0;
-            doRegWr  <= 1'b0;
+    // ----------------------------------------------------------- request CDC/FSM
+    reg reqMetaPhy;
+    reg reqSyncPhy;
+    reg reqSeenPhy;
+    reg [2:0] phyState;
+
+    reg        activeBank;
+    reg        reqWritePhy;
+    reg [21:0] reqAddrPhy;
+    reg [31:0] reqWdataPhy;
+    reg [3:0]  reqWstrbPhy;
+
+    reg        phyStart0;
+    reg        phyStart1;
+    reg        phyWr;
+    reg [21:0] phyAddr;
+    reg [1:0]  phyMask;
+    reg [15:0] phyDin;
+
+    wire [15:0] phyDout0;
+    wire [15:0] phyDout1;
+    wire phyBusy0, phyBusy1;
+    wire phyDone0, phyDone1;
+    wire phyInitDone0, phyInitDone1;
+
+    wire activeDone = activeBank ? phyDone1 : phyDone0;
+    wire [15:0] activeDout = activeBank ? phyDout1 : phyDout0;
+
+    always @(posedge phy_clk) begin
+        phyStart0 <= 1'b0;
+        phyStart1 <= 1'b0;
+        reqMetaPhy <= reqToggleCpu;
+        reqSyncPhy <= reqMetaPhy;
+
+        if (!phyReset_n) begin
+            reqMetaPhy   <= 1'b0;
+            reqSyncPhy   <= 1'b0;
+            reqSeenPhy   <= 1'b0;
+            phyState     <= P_WAIT_INIT;
+            activeBank   <= 1'b0;
+            reqWritePhy  <= 1'b0;
+            reqAddrPhy   <= 22'd0;
+            reqWdataPhy  <= 32'd0;
+            reqWstrbPhy  <= 4'd0;
+            phyStart0    <= 1'b0;
+            phyStart1    <= 1'b0;
+            phyWr        <= 1'b0;
+            phyAddr      <= 22'd0;
+            phyMask      <= 2'b11;
+            phyDin       <= 16'd0;
+            respDataPhy  <= 32'd0;
+            ackTogglePhy <= 1'b0;
         end else begin
-            // doRegRd 只在这里驱动：配置写置位，主 FSM 发 regRdStart 后清除。
-            if (regRdStart) begin
-                doRegRd <= 1'b0;
-            end else if (cfg_valid && (cfg_addr[5:2] == 4'd5) && cfg_wstrb[0]) begin
-                doRegRd <= 1'b1;                        // 0x014: 触发一次 CR0 读
-            end
-            if (regWrStart) begin
-                doRegWr <= 1'b0;
-            end else if (cfg_valid && (cfg_addr[5:2] == 4'd8) && cfg_wstrb[0]) begin
-                doRegWr <= 1'b1;                        // 0x020: 用当前 cr0Value 写一次 CR0
-            end
+            case (phyState)
+                P_WAIT_INIT: begin
+                    if (phyInitDone0 && phyInitDone1)
+                        phyState <= P_IDLE;
+                end
 
-            if (cfg_valid) begin
-                cfg_ready <= 1'b1;
-                if (cfg_addr[3:2] == 2'd0) begin
-                    if (cfg_wstrb[0]) rdLat <= cfg_wdata[5:0];      // 0~63
-                    if (cfg_wstrb[1]) wrLat <= cfg_wdata[13:8];     // 0~63
+                P_IDLE: begin
+                    if (reqSyncPhy != reqSeenPhy) begin
+                        reqSeenPhy  <= reqSyncPhy;
+                        activeBank  <= reqAddrCpu[22];
+                        reqWritePhy <= (reqWstrbCpu != 4'b0000);
+                        reqAddrPhy  <= {reqAddrCpu[21:2], 2'b00};
+                        reqWdataPhy <= reqWdataCpu;
+                        reqWstrbPhy <= reqWstrbCpu;
+
+                        if ((reqWstrbCpu != 4'b0000) &&
+                            (reqWstrbCpu[1:0] == 2'b00)) begin
+                            // Upper-half-only store.
+                            phyWr   <= 1'b1;
+                            phyAddr <= {reqAddrCpu[21:2], 2'b00} + 22'd2;
+                            phyMask <= ~reqWstrbCpu[3:2];
+                            phyDin  <= reqWdataCpu[31:16];
+                            if (reqAddrCpu[22]) phyStart1 <= 1'b1;
+                            else                phyStart0 <= 1'b1;
+                            phyState <= P_HIGH_WAIT;
+                        end else begin
+                            // Read, or store touching the lower halfword.
+                            phyWr   <= (reqWstrbCpu != 4'b0000);
+                            phyAddr <= {reqAddrCpu[21:2], 2'b00};
+                            phyMask <= (reqWstrbCpu == 4'b0000) ?
+                                       2'b11 : ~reqWstrbCpu[1:0];
+                            phyDin  <= reqWdataCpu[15:0];
+                            if (reqAddrCpu[22]) phyStart1 <= 1'b1;
+                            else                phyStart0 <= 1'b1;
+                            phyState <= P_LOW_WAIT;
+                        end
+                    end
                 end
-                if (cfg_addr[3:2] == 2'd2) begin
-                    if (cfg_wstrb[0]) ckPhaseR <= cfg_wdata[3:0];
+
+                P_LOW_WAIT: begin
+                    if (activeDone) begin
+                        if (!reqWritePhy)
+                            respDataPhy[15:0] <= activeDout;
+
+                        if (reqWritePhy && (reqWstrbPhy[3:2] == 2'b00)) begin
+                            ackTogglePhy <= ~ackTogglePhy;
+                            phyState <= P_IDLE;
+                        end else begin
+                            phyWr   <= reqWritePhy;
+                            phyAddr <= reqAddrPhy + 22'd2;
+                            phyMask <= reqWritePhy ? ~reqWstrbPhy[3:2] : 2'b11;
+                            phyDin  <= reqWdataPhy[31:16];
+                            if (activeBank) phyStart1 <= 1'b1;
+                            else            phyStart0 <= 1'b1;
+                            phyState <= P_HIGH_WAIT;
+                        end
+                    end
                 end
-                if (cfg_addr[5:2] == 4'd7) begin
-                    if (cfg_wstrb[0]) cr0Value <= cfg_wdata[15:0];   // 0x01C: 设置 CR0 写值
+
+                P_HIGH_WAIT: begin
+                    if (activeDone) begin
+                        if (!reqWritePhy)
+                            respDataPhy[31:16] <= activeDout;
+                        ackTogglePhy <= ~ackTogglePhy;
+                        phyState <= P_IDLE;
+                    end
                 end
-            end
+
+                default: phyState <= P_WAIT_INIT;
+            endcase
+        end
+    end
+
+    // ------------------------------------------------------------- two x8 dies
+    psramPhy #(
+        .FREQ_HZ(PHY_FREQ_HZ), .LATENCY(LATENCY), .DIE_INDEX(0)
+    ) phy0 (
+        .clk(phy_clk), .clk_p(clk_p), .reset_n(phyReset_n),
+        .start(phyStart0), .wr(phyWr), .byteAddr(phyAddr),
+        .wmask(phyMask), .dIn(phyDin), .dOut(phyDout0),
+        .busy(phyBusy0), .done(phyDone0), .initDone(phyInitDone0),
+        .O_psram_ck(O_psram_ck[0]), .O_psram_ck_n(O_psram_ck_n[0]),
+        .O_psram_cs_n(O_psram_cs_n[0]),
+        .O_psram_reset_n(O_psram_reset_n[0]),
+        .IO_psram_rwds(IO_psram_rwds[0]), .IO_psram_dq(IO_psram_dq[7:0])
+    );
+
+    psramPhy #(
+        .FREQ_HZ(PHY_FREQ_HZ), .LATENCY(LATENCY), .DIE_INDEX(1)
+    ) phy1 (
+        .clk(phy_clk), .clk_p(clk_p), .reset_n(phyReset_n),
+        .start(phyStart1), .wr(phyWr), .byteAddr(phyAddr),
+        .wmask(phyMask), .dIn(phyDin), .dOut(phyDout1),
+        .busy(phyBusy1), .done(phyDone1), .initDone(phyInitDone1),
+        .O_psram_ck(O_psram_ck[1]), .O_psram_ck_n(O_psram_ck_n[1]),
+        .O_psram_cs_n(O_psram_cs_n[1]),
+        .O_psram_reset_n(O_psram_reset_n[1]),
+        .IO_psram_rwds(IO_psram_rwds[1]), .IO_psram_dq(IO_psram_dq[15:8])
+    );
+
+    // ------------------------------------------------------------ diagnostics
+    reg init0MetaCpu, init0SyncCpu;
+    reg init1MetaCpu, init1SyncCpu;
+    reg busyMetaCpu, busySyncCpu;
+    assign initDoneCpu = init0SyncCpu && init1SyncCpu;
+    wire phyBusyAny = phyBusy0 || phyBusy1 || (phyState != P_IDLE);
+
+    always @(posedge clk) begin
+        if (!reset_n) begin
+            init0MetaCpu <= 1'b0;
+            init0SyncCpu <= 1'b0;
+            init1MetaCpu <= 1'b0;
+            init1SyncCpu <= 1'b0;
+            busyMetaCpu  <= 1'b1;
+            busySyncCpu  <= 1'b1;
+        end else begin
+            init0MetaCpu <= phyInitDone0;
+            init0SyncCpu <= init0MetaCpu;
+            init1MetaCpu <= phyInitDone1;
+            init1SyncCpu <= init1MetaCpu;
+            busyMetaCpu  <= phyBusyAny;
+            busySyncCpu  <= busyMetaCpu;
+        end
+    end
+
+    // Count phase-clock edges for a board-level clock-alive diagnostic.
+    reg [31:0] ckpCnt = 32'd0;
+    reg [15:0] ckpCntMeta;
+    reg [15:0] ckpCntSync;
+    always @(posedge clk_p)
+        ckpCnt <= ckpCnt + 32'd1;
+    always @(posedge clk) begin
+        if (!reset_n) begin
+            ckpCntMeta <= 16'd0;
+            ckpCntSync <= 16'd0;
+        end else begin
+            ckpCntMeta <= ckpCnt[31:16];
+            ckpCntSync <= ckpCntMeta;
+        end
+    end
+
+    always @(posedge clk) begin
+        if (!reset_n) begin
+            cfg_ready <= 1'b0;
+            ckPhaseR  <= 4'd4;
+        end else begin
+            cfg_ready <= cfg_valid;
+            if (cfg_valid && !cfg_ready && cfg_addr[5:2] == 4'd2 &&
+                cfg_wstrb[0])
+                ckPhaseR <= cfg_wdata[3:0];
         end
     end
 
     always @* begin
         case (cfg_addr[5:2])
-            4'd0:    cfg_rdata = {20'd0, wrLat, rdLat};
-            4'd1:    cfg_rdata = {30'd0, phyBusy, initDone};
+            4'd0:    cfg_rdata = PHY_FREQ_HZ;
+            4'd1:    cfg_rdata = {28'd0, init1SyncCpu, init0SyncCpu,
+                                  busySyncCpu, initDoneCpu};
             4'd2:    cfg_rdata = {28'd0, ckPhaseR};
-            // 位流版本戳 "PSR8"：固件读这个判断跑的是哪版位流。
-            4'd3:    cfg_rdata = 32'h5053_5238;
+            4'd3:    cfg_rdata = 32'h5053_5246; // "PSRF": fixed latency rev F
             4'd4:    cfg_rdata = {16'd0, ckpCntSync};
-            4'd6:    cfg_rdata = regRdData;
-            4'd7:    cfg_rdata = {16'd0, cr0Value};
+            4'd5:    cfg_rdata = 32'h0080_0000; // total CPU-visible bytes
             default: cfg_rdata = 32'd0;
         endcase
     end
-
-    // ------------------------------------------------------------------ PHY
-    psramPhy phy (
-        .clk        (clk),
-        .clk_p      (clk_p),
-        .reset_n    (reset_n),
-
-        .start      (phyStart),
-        .wr         (txWr),
-        .regWr      (txRegWr),
-        .regRd      (txRegRd),
-        .regWrData  (cr0Value),
-        .wordAddr   (txAddr),
-        .wmask      (txMask),
-        .len        (7'd1),
-        .rdLat      (rdLat),
-        .wrLat      (wrLat),
-        .busy       (phyBusy),
-        .done       (phyDone),
-        .dIn        (txDin),
-        .dOut       (phyDout),
-        .dOutWr     (phyDoutWr),
-
-        .O_psram_ck     (O_psram_ck),
-        .O_psram_ck_n   (O_psram_ck_n),
-        .O_psram_cs_n   (O_psram_cs_n),
-        .O_psram_reset_n(O_psram_reset_n),
-        .IO_psram_rwds  (IO_psram_rwds),
-        .IO_psram_dq    (IO_psram_dq)
-    );
 
 endmodule
 
