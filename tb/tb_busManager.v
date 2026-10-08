@@ -37,7 +37,7 @@ module tb_busManager;
     reg  psramcfg_ready = 0;
     wire [31:0] psramcfg_addr, psramcfg_wdata;
     wire [3:0] psramcfg_wstrb;
-    reg  [31:0] psramcfg_rdata = 32'h5053_5246;
+    reg  [31:0] psramcfg_rdata = 32'h5053_5253;
     wire unmapped_valid;
 
     busManager dut (
@@ -160,7 +160,7 @@ module tb_busManager;
             $fatal(1, "MMIO upper boundary failed");
         clear_request;
 
-        // PSRAM 8 MiB dual-bank window boundaries.
+        // CPU sees one 4 MiB logical back-die window.
         mem_valid = 1;
         mem_addr = 32'h0200_0000;
         psram_ready = 1;
@@ -168,11 +168,11 @@ module tb_busManager;
         assert_one_hot(0, 0, 0, 1, 0, 0);
         if (psram_addr !== 0 || !mem_ready || mem_rdata !== psram_rdata)
             $fatal(1, "PSRAM lower boundary failed");
-        mem_addr = 32'h027f_fffc;
+        mem_addr = 32'h023f_fffc;
         #1;
-        if (psram_addr !== 32'h007f_fffc)
+        if (psram_addr !== 32'h003f_fffc)
             $fatal(1, "PSRAM upper boundary failed");
-        mem_addr = 32'h0280_0000;
+        mem_addr = 32'h0240_0000;
         #1;
         assert_one_hot(0, 0, 0, 0, 0, 1);
         clear_request;

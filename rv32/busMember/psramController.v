@@ -2,19 +2,16 @@
 `default_nettype none
 
 //------------------------------------------------------------------------------
-// PicoRV32 bridge for both embedded PSRAM dies.
+// PicoRV32 bridge, front/back switcher and two embedded-PSRAM PHYs.
 //
-// CPU side: 40 MHz PicoRV32 native memory bus.
-// PHY side: 80 MHz, two independent x8 PSRAM dies.
+// CPU side: 40 MHz PicoRV32 native-memory bus, one logical 4 MiB window.
+// PHY side: 80 MHz, two independent x8 dies.  The CPU always reaches the
+// logical back die; HDMI exclusively reaches the front die.  A frame-boundary
+// swap flips only the mapping, never copies memory contents.
 //
-// Address map inside this block:
-//   0x000000-0x3fffff -> die 0 (future front/back framebuffer bank)
-//   0x400000-0x7fffff -> die 1 (future front/back framebuffer bank)
-//
-// Each die transfers a 16-bit word per non-burst transaction.  A 32-bit CPU
-// access is split into low/high halfwords on the selected die.  The clock-domain
-// crossing uses a request/acknowledge toggle with bundled data: request fields
-// stay stable until the response has crossed back to the CPU clock domain.
+// A 32-bit CPU access is split into one or two 16-bit switcher commands.  The
+// CPU-to-PHY crossing uses a request/acknowledge toggle with bundled data.
+// Future GPU and HDMI ports are already present in the PHY clock domain.
 //------------------------------------------------------------------------------
 module psramController #(
     parameter integer PHY_FREQ_HZ = 80_000_000,
@@ -39,6 +36,26 @@ module psramController #(
     input  wire [ 3:0] cfg_wstrb,
     output reg  [31:0] cfg_rdata,
 
+    // Future GPU port, synchronous to phy_clk.  GPU has priority over CPU for
+    // the back die when both are waiting at a command boundary.
+    input  wire        gpu_valid,
+    output wire        gpu_ready,
+    input  wire        gpu_wr,
+    input  wire [21:0] gpu_addr,
+    input  wire [ 1:0] gpu_mask,
+    input  wire [15:0] gpu_wdata,
+    output wire [15:0] gpu_rdata,
+    output wire        gpu_done,
+
+    // Future HDMI read port, synchronous to phy_clk and exclusive to front.
+    input  wire        hdmi_valid,
+    output wire        hdmi_ready,
+    input  wire [21:0] hdmi_addr,
+    output wire [15:0] hdmi_rdata,
+    output wire        hdmi_done,
+    input  wire        hdmi_frame_done,
+    output wire        frame_swap_request,
+
     output wire [3:0]  ckPhase,
 
     output wire [1:0]  O_psram_ck,
@@ -52,37 +69,31 @@ module psramController #(
                      C_WAIT = 2'd1,
                      C_RESP = 2'd2;
 
-    localparam [2:0] P_WAIT_INIT = 3'd0,
-                     P_IDLE      = 3'd1,
-                     P_LOW_WAIT  = 3'd2,
-                     P_HIGH_WAIT = 3'd3;
+    localparam [2:0] P_WAIT_INIT  = 3'd0,
+                     P_IDLE       = 3'd1,
+                     P_LOW_ISSUE  = 3'd2,
+                     P_LOW_WAIT   = 3'd3,
+                     P_HIGH_ISSUE = 3'd4,
+                     P_HIGH_WAIT  = 3'd5;
 
-    // Power up at the previously proven 90-degree setting, then allow firmware
-    // to move CLKOUTP through the 16 rPLL phase taps while the PHY is idle.
-    // This is intentionally a CPU-domain register: the Gowin rPLL PSDA input
-    // is an asynchronous dynamic-control input, not a clocked bus.
-    reg [3:0] ckPhaseR = 4'd4;
+    // Phase 5 is the center selected from the measured common pass window 2..7.
+    reg [3:0] ckPhaseR = 4'd5;
     assign ckPhase = ckPhaseR;
 
     // ---------------------------------------------------------------- CPU side
-    // Bundled request data.  These registers remain unchanged from the request
-    // toggle until the PHY response has returned.
     reg [1:0]  cpuState;
-    reg [22:0] reqAddrCpu;
+    reg [21:0] reqAddrCpu;
     reg [31:0] reqWdataCpu;
-    reg [3:0]  reqWstrbCpu;
+    reg [ 3:0] reqWstrbCpu;
     reg        reqToggleCpu;
 
     reg ackMetaCpu;
     reg ackSyncCpu;
     reg ackSeenCpu;
 
-    // Response data is written in the PHY domain before ackTogglePhy changes
-    // and remains stable until the next request completes.
     reg [31:0] respDataPhy;
     reg        ackTogglePhy;
-
-    wire initDoneCpu;
+    wire       initDoneCpu;
 
     always @(posedge clk) begin
         mem_ready  <= 1'b0;
@@ -91,7 +102,7 @@ module psramController #(
 
         if (!reset_n) begin
             cpuState     <= C_IDLE;
-            reqAddrCpu   <= 23'd0;
+            reqAddrCpu   <= 22'd0;
             reqWdataCpu  <= 32'd0;
             reqWstrbCpu  <= 4'd0;
             reqToggleCpu <= 1'b0;
@@ -103,7 +114,7 @@ module psramController #(
             case (cpuState)
                 C_IDLE: begin
                     if (mem_valid && initDoneCpu) begin
-                        reqAddrCpu   <= mem_addr[22:0];
+                        reqAddrCpu   <= mem_addr[21:0];
                         reqWdataCpu  <= mem_wdata;
                         reqWstrbCpu  <= mem_wstrb;
                         reqToggleCpu <= ~reqToggleCpu;
@@ -120,8 +131,6 @@ module psramController #(
                 end
 
                 C_RESP: begin
-                    // Hold ready until the PicoRV32 master releases valid; this
-                    // prevents the just-finished transfer from being replayed.
                     if (mem_valid)
                         mem_ready <= 1'b1;
                     else
@@ -134,44 +143,35 @@ module psramController #(
     end
 
     // --------------------------------------------------------------- PHY reset
-    // Synchronous assertion/deassertion in the 80 MHz domain.  Initial values
-    // keep both embedded dies reset while the PLL and CPU reset logic settle.
     reg [2:0] phyResetPipe = 3'b000;
     always @(posedge phy_clk)
         phyResetPipe <= {phyResetPipe[1:0], reset_n};
     wire phyReset_n = phyResetPipe[2];
 
-    // ----------------------------------------------------------- request CDC/FSM
+    // ------------------------------------------------------- CPU request bridge
     reg reqMetaPhy;
     reg reqSyncPhy;
     reg reqSeenPhy;
     reg [2:0] phyState;
 
-    reg        activeBank;
     reg        reqWritePhy;
     reg [21:0] reqAddrPhy;
     reg [31:0] reqWdataPhy;
-    reg [3:0]  reqWstrbPhy;
+    reg [ 3:0] reqWstrbPhy;
 
-    reg        phyStart0;
-    reg        phyStart1;
-    reg        phyWr;
-    reg [21:0] phyAddr;
-    reg [1:0]  phyMask;
-    reg [15:0] phyDin;
+    reg         cpuCmdValid;
+    reg         cpuCmdWr;
+    reg  [21:0] cpuCmdAddr;
+    reg  [ 1:0] cpuCmdMask;
+    reg  [15:0] cpuCmdWdata;
+    wire        cpuCmdReady;
+    wire [15:0] cpuCmdRdata;
+    wire        cpuCmdDone;
 
-    wire [15:0] phyDout0;
-    wire [15:0] phyDout1;
-    wire phyBusy0, phyBusy1;
-    wire phyDone0, phyDone1;
-    wire phyInitDone0, phyInitDone1;
-
-    wire activeDone = activeBank ? phyDone1 : phyDone0;
-    wire [15:0] activeDout = activeBank ? phyDout1 : phyDout0;
+    wire phyInitDone0;
+    wire phyInitDone1;
 
     always @(posedge phy_clk) begin
-        phyStart0 <= 1'b0;
-        phyStart1 <= 1'b0;
         reqMetaPhy <= reqToggleCpu;
         reqSyncPhy <= reqMetaPhy;
 
@@ -180,17 +180,15 @@ module psramController #(
             reqSyncPhy   <= 1'b0;
             reqSeenPhy   <= 1'b0;
             phyState     <= P_WAIT_INIT;
-            activeBank   <= 1'b0;
             reqWritePhy  <= 1'b0;
             reqAddrPhy   <= 22'd0;
             reqWdataPhy  <= 32'd0;
             reqWstrbPhy  <= 4'd0;
-            phyStart0    <= 1'b0;
-            phyStart1    <= 1'b0;
-            phyWr        <= 1'b0;
-            phyAddr      <= 22'd0;
-            phyMask      <= 2'b11;
-            phyDin       <= 16'd0;
+            cpuCmdValid  <= 1'b0;
+            cpuCmdWr     <= 1'b0;
+            cpuCmdAddr   <= 22'd0;
+            cpuCmdMask   <= 2'b11;
+            cpuCmdWdata  <= 16'd0;
             respDataPhy  <= 32'd0;
             ackTogglePhy <= 1'b0;
         end else begin
@@ -203,7 +201,6 @@ module psramController #(
                 P_IDLE: begin
                     if (reqSyncPhy != reqSeenPhy) begin
                         reqSeenPhy  <= reqSyncPhy;
-                        activeBank  <= reqAddrCpu[22];
                         reqWritePhy <= (reqWstrbCpu != 4'b0000);
                         reqAddrPhy  <= {reqAddrCpu[21:2], 2'b00};
                         reqWdataPhy <= reqWdataCpu;
@@ -211,52 +208,61 @@ module psramController #(
 
                         if ((reqWstrbCpu != 4'b0000) &&
                             (reqWstrbCpu[1:0] == 2'b00)) begin
-                            // Upper-half-only store.
-                            phyWr   <= 1'b1;
-                            phyAddr <= {reqAddrCpu[21:2], 2'b00} + 22'd2;
-                            phyMask <= ~reqWstrbCpu[3:2];
-                            phyDin  <= reqWdataCpu[31:16];
-                            if (reqAddrCpu[22]) phyStart1 <= 1'b1;
-                            else                phyStart0 <= 1'b1;
-                            phyState <= P_HIGH_WAIT;
+                            cpuCmdWr    <= 1'b1;
+                            cpuCmdAddr  <= {reqAddrCpu[21:2], 2'b00} + 22'd2;
+                            cpuCmdMask  <= ~reqWstrbCpu[3:2];
+                            cpuCmdWdata <= reqWdataCpu[31:16];
+                            cpuCmdValid <= 1'b1;
+                            phyState    <= P_HIGH_ISSUE;
                         end else begin
-                            // Read, or store touching the lower halfword.
-                            phyWr   <= (reqWstrbCpu != 4'b0000);
-                            phyAddr <= {reqAddrCpu[21:2], 2'b00};
-                            phyMask <= (reqWstrbCpu == 4'b0000) ?
-                                       2'b11 : ~reqWstrbCpu[1:0];
-                            phyDin  <= reqWdataCpu[15:0];
-                            if (reqAddrCpu[22]) phyStart1 <= 1'b1;
-                            else                phyStart0 <= 1'b1;
-                            phyState <= P_LOW_WAIT;
+                            cpuCmdWr    <= (reqWstrbCpu != 4'b0000);
+                            cpuCmdAddr  <= {reqAddrCpu[21:2], 2'b00};
+                            cpuCmdMask  <= (reqWstrbCpu == 4'b0000) ?
+                                           2'b11 : ~reqWstrbCpu[1:0];
+                            cpuCmdWdata <= reqWdataCpu[15:0];
+                            cpuCmdValid <= 1'b1;
+                            phyState    <= P_LOW_ISSUE;
                         end
+                    end
+                end
+
+                P_LOW_ISSUE: begin
+                    if (cpuCmdReady) begin
+                        cpuCmdValid <= 1'b0;
+                        phyState <= P_LOW_WAIT;
                     end
                 end
 
                 P_LOW_WAIT: begin
-                    if (activeDone) begin
+                    if (cpuCmdDone) begin
                         if (!reqWritePhy)
-                            respDataPhy[15:0] <= activeDout;
+                            respDataPhy[15:0] <= cpuCmdRdata;
 
-                        if (reqWritePhy && (reqWstrbPhy[3:2] == 2'b00)) begin
+                        if (reqWritePhy && reqWstrbPhy[3:2] == 2'b00) begin
                             ackTogglePhy <= ~ackTogglePhy;
                             phyState <= P_IDLE;
                         end else begin
-                            phyWr   <= reqWritePhy;
-                            phyAddr <= reqAddrPhy + 22'd2;
-                            phyMask <= reqWritePhy ? ~reqWstrbPhy[3:2] : 2'b11;
-                            phyDin  <= reqWdataPhy[31:16];
-                            if (activeBank) phyStart1 <= 1'b1;
-                            else            phyStart0 <= 1'b1;
-                            phyState <= P_HIGH_WAIT;
+                            cpuCmdWr    <= reqWritePhy;
+                            cpuCmdAddr  <= reqAddrPhy + 22'd2;
+                            cpuCmdMask  <= reqWritePhy ? ~reqWstrbPhy[3:2] : 2'b11;
+                            cpuCmdWdata <= reqWdataPhy[31:16];
+                            cpuCmdValid <= 1'b1;
+                            phyState    <= P_HIGH_ISSUE;
                         end
                     end
                 end
 
+                P_HIGH_ISSUE: begin
+                    if (cpuCmdReady) begin
+                        cpuCmdValid <= 1'b0;
+                        phyState <= P_HIGH_WAIT;
+                    end
+                end
+
                 P_HIGH_WAIT: begin
-                    if (activeDone) begin
+                    if (cpuCmdDone) begin
                         if (!reqWritePhy)
-                            respDataPhy[31:16] <= activeDout;
+                            respDataPhy[31:16] <= cpuCmdRdata;
                         ackTogglePhy <= ~ackTogglePhy;
                         phyState <= P_IDLE;
                     end
@@ -267,13 +273,98 @@ module psramController #(
         end
     end
 
-    // ------------------------------------------------------------- two x8 dies
+    // ---------------------------------------------------------- swap-control CDC
+    reg swapReqToggleCpu;
+    reg softFrameToggleCpu;
+    reg swapReqMetaPhy, swapReqSyncPhy, swapReqSeenPhy;
+    reg softFrameMetaPhy, softFrameSyncPhy, softFrameSeenPhy;
+
+    always @(posedge phy_clk) begin
+        if (!phyReset_n) begin
+            swapReqMetaPhy    <= 1'b0;
+            swapReqSyncPhy    <= 1'b0;
+            swapReqSeenPhy    <= 1'b0;
+            softFrameMetaPhy  <= 1'b0;
+            softFrameSyncPhy  <= 1'b0;
+            softFrameSeenPhy  <= 1'b0;
+        end else begin
+            swapReqMetaPhy   <= swapReqToggleCpu;
+            swapReqSyncPhy   <= swapReqMetaPhy;
+            swapReqSeenPhy   <= swapReqSyncPhy;
+            softFrameMetaPhy <= softFrameToggleCpu;
+            softFrameSyncPhy <= softFrameMetaPhy;
+            softFrameSeenPhy <= softFrameSyncPhy;
+        end
+    end
+
+    wire swapReqPulsePhy = swapReqSyncPhy != swapReqSeenPhy;
+    wire softFramePulsePhy = softFrameSyncPhy != softFrameSeenPhy;
+    wire frameDonePulsePhy = hdmi_frame_done || softFramePulsePhy;
+
+    // ------------------------------------------------------------- switcher/PHY
+    wire phyStart0, phyWr0;
+    wire [21:0] phyAddr0;
+    wire [1:0] phyMask0;
+    wire [15:0] phyDin0;
+    wire [15:0] phyDout0;
+    wire phyBusy0, phyDone0;
+
+    wire phyStart1, phyWr1;
+    wire [21:0] phyAddr1;
+    wire [1:0] phyMask1;
+    wire [15:0] phyDin1;
+    wire [15:0] phyDout1;
+    wire phyBusy1, phyDone1;
+
+    wire switchBusy;
+    wire switchGpuActive;
+    wire switchHdmiActive;
+    wire switchSwapPending;
+    wire switchSwapDoneToggle;
+    wire [15:0] switchSwapCount;
+    wire switchFrontDie;
+    wire switchBackDie;
+    wire cpuSequenceActive = (phyState != P_IDLE) &&
+                             (phyState != P_WAIT_INIT);
+
+    psramSwitcher switcher (
+        .clk(phy_clk), .reset_n(phyReset_n),
+        .cpu_valid(cpuCmdValid), .cpu_ready(cpuCmdReady),
+        .cpu_sequence_active(cpuSequenceActive),
+        .cpu_wr(cpuCmdWr), .cpu_addr(cpuCmdAddr),
+        .cpu_mask(cpuCmdMask), .cpu_wdata(cpuCmdWdata),
+        .cpu_rdata(cpuCmdRdata), .cpu_done(cpuCmdDone),
+        .gpu_valid(gpu_valid), .gpu_ready(gpu_ready), .gpu_wr(gpu_wr),
+        .gpu_addr(gpu_addr), .gpu_mask(gpu_mask), .gpu_wdata(gpu_wdata),
+        .gpu_rdata(gpu_rdata), .gpu_done(gpu_done),
+        .hdmi_valid(hdmi_valid), .hdmi_ready(hdmi_ready),
+        .hdmi_addr(hdmi_addr), .hdmi_rdata(hdmi_rdata),
+        .hdmi_done(hdmi_done),
+        .swap_request_pulse(swapReqPulsePhy),
+        .frame_done_pulse(frameDonePulsePhy),
+        .swap_request_hdmi(frame_swap_request),
+        .swap_pending(switchSwapPending),
+        .swap_done_toggle(switchSwapDoneToggle),
+        .swap_count(switchSwapCount),
+        .front_die(switchFrontDie), .back_die(switchBackDie),
+        .any_busy(switchBusy), .gpu_active(switchGpuActive),
+        .hdmi_active(switchHdmiActive),
+        .phy0_start(phyStart0), .phy0_wr(phyWr0), .phy0_addr(phyAddr0),
+        .phy0_mask(phyMask0), .phy0_wdata(phyDin0),
+        .phy0_rdata(phyDout0), .phy0_busy(phyBusy0),
+        .phy0_done(phyDone0), .phy0_init_done(phyInitDone0),
+        .phy1_start(phyStart1), .phy1_wr(phyWr1), .phy1_addr(phyAddr1),
+        .phy1_mask(phyMask1), .phy1_wdata(phyDin1),
+        .phy1_rdata(phyDout1), .phy1_busy(phyBusy1),
+        .phy1_done(phyDone1), .phy1_init_done(phyInitDone1)
+    );
+
     psramPhy #(
         .FREQ_HZ(PHY_FREQ_HZ), .LATENCY(LATENCY), .DIE_INDEX(0)
     ) phy0 (
         .clk(phy_clk), .clk_p(clk_p), .reset_n(phyReset_n),
-        .start(phyStart0), .wr(phyWr), .byteAddr(phyAddr),
-        .wmask(phyMask), .dIn(phyDin), .dOut(phyDout0),
+        .start(phyStart0), .wr(phyWr0), .byteAddr(phyAddr0),
+        .wmask(phyMask0), .dIn(phyDin0), .dOut(phyDout0),
         .busy(phyBusy0), .done(phyDone0), .initDone(phyInitDone0),
         .O_psram_ck(O_psram_ck[0]), .O_psram_ck_n(O_psram_ck_n[0]),
         .O_psram_cs_n(O_psram_cs_n[0]),
@@ -285,8 +376,8 @@ module psramController #(
         .FREQ_HZ(PHY_FREQ_HZ), .LATENCY(LATENCY), .DIE_INDEX(1)
     ) phy1 (
         .clk(phy_clk), .clk_p(clk_p), .reset_n(phyReset_n),
-        .start(phyStart1), .wr(phyWr), .byteAddr(phyAddr),
-        .wmask(phyMask), .dIn(phyDin), .dOut(phyDout1),
+        .start(phyStart1), .wr(phyWr1), .byteAddr(phyAddr1),
+        .wmask(phyMask1), .dIn(phyDin1), .dOut(phyDout1),
         .busy(phyBusy1), .done(phyDone1), .initDone(phyInitDone1),
         .O_psram_ck(O_psram_ck[1]), .O_psram_ck_n(O_psram_ck_n[1]),
         .O_psram_cs_n(O_psram_cs_n[1]),
@@ -298,24 +389,62 @@ module psramController #(
     reg init0MetaCpu, init0SyncCpu;
     reg init1MetaCpu, init1SyncCpu;
     reg busyMetaCpu, busySyncCpu;
+    reg pendingMetaCpu, pendingSyncCpu;
+    reg frontMetaCpu, frontSyncCpu;
+    reg backMetaCpu, backSyncCpu;
+    reg gpuMetaCpu, gpuSyncCpu;
+    reg hdmiMetaCpu, hdmiSyncCpu;
+    reg swapDoneMetaCpu, swapDoneSyncCpu, swapDoneSeenCpu;
+    reg [15:0] swapCountCpu;
+
     assign initDoneCpu = init0SyncCpu && init1SyncCpu;
-    wire phyBusyAny = phyBusy0 || phyBusy1 || (phyState != P_IDLE);
+    wire phyBusyAny = switchBusy || (phyState != P_IDLE);
 
     always @(posedge clk) begin
         if (!reset_n) begin
-            init0MetaCpu <= 1'b0;
-            init0SyncCpu <= 1'b0;
-            init1MetaCpu <= 1'b0;
-            init1SyncCpu <= 1'b0;
-            busyMetaCpu  <= 1'b1;
-            busySyncCpu  <= 1'b1;
+            init0MetaCpu    <= 1'b0;
+            init0SyncCpu    <= 1'b0;
+            init1MetaCpu    <= 1'b0;
+            init1SyncCpu    <= 1'b0;
+            busyMetaCpu     <= 1'b1;
+            busySyncCpu     <= 1'b1;
+            pendingMetaCpu  <= 1'b0;
+            pendingSyncCpu  <= 1'b0;
+            frontMetaCpu    <= 1'b1;
+            frontSyncCpu    <= 1'b1;
+            backMetaCpu     <= 1'b0;
+            backSyncCpu     <= 1'b0;
+            gpuMetaCpu      <= 1'b0;
+            gpuSyncCpu      <= 1'b0;
+            hdmiMetaCpu     <= 1'b0;
+            hdmiSyncCpu     <= 1'b0;
+            swapDoneMetaCpu <= 1'b0;
+            swapDoneSyncCpu <= 1'b0;
+            swapDoneSeenCpu <= 1'b0;
+            swapCountCpu    <= 16'd0;
         end else begin
-            init0MetaCpu <= phyInitDone0;
-            init0SyncCpu <= init0MetaCpu;
-            init1MetaCpu <= phyInitDone1;
-            init1SyncCpu <= init1MetaCpu;
-            busyMetaCpu  <= phyBusyAny;
-            busySyncCpu  <= busyMetaCpu;
+            init0MetaCpu    <= phyInitDone0;
+            init0SyncCpu    <= init0MetaCpu;
+            init1MetaCpu    <= phyInitDone1;
+            init1SyncCpu    <= init1MetaCpu;
+            busyMetaCpu     <= phyBusyAny;
+            busySyncCpu     <= busyMetaCpu;
+            pendingMetaCpu  <= switchSwapPending;
+            pendingSyncCpu  <= pendingMetaCpu;
+            frontMetaCpu    <= switchFrontDie;
+            frontSyncCpu    <= frontMetaCpu;
+            backMetaCpu     <= switchBackDie;
+            backSyncCpu     <= backMetaCpu;
+            gpuMetaCpu      <= switchGpuActive;
+            gpuSyncCpu      <= gpuMetaCpu;
+            hdmiMetaCpu     <= switchHdmiActive;
+            hdmiSyncCpu     <= hdmiMetaCpu;
+            swapDoneMetaCpu <= switchSwapDoneToggle;
+            swapDoneSyncCpu <= swapDoneMetaCpu;
+            if (swapDoneSyncCpu != swapDoneSeenCpu) begin
+                swapDoneSeenCpu <= swapDoneSyncCpu;
+                swapCountCpu <= swapCountCpu + 16'd1;
+            end
         end
     end
 
@@ -335,31 +464,49 @@ module psramController #(
         end
     end
 
+    // ---------------------------------------------------------- config/MMIO
+    // 0x18 write bit0: request swap at next HDMI frame boundary.
+    // 0x18 write bit1: inject a frame-done pulse for pre-HDMI board testing.
     always @(posedge clk) begin
         if (!reset_n) begin
-            cfg_ready <= 1'b0;
-            ckPhaseR  <= 4'd4;
+            cfg_ready          <= 1'b0;
+            ckPhaseR           <= 4'd5;
+            swapReqToggleCpu   <= 1'b0;
+            softFrameToggleCpu <= 1'b0;
         end else begin
             cfg_ready <= cfg_valid;
-            if (cfg_valid && !cfg_ready && cfg_addr[5:2] == 4'd2 &&
-                cfg_wstrb[0])
-                ckPhaseR <= cfg_wdata[3:0];
+            if (cfg_valid && !cfg_ready && cfg_wstrb[0]) begin
+                if (cfg_addr[5:2] == 4'd2)
+                    ckPhaseR <= cfg_wdata[3:0];
+                if (cfg_addr[5:2] == 4'd6) begin
+                    if (cfg_wdata[0])
+                        swapReqToggleCpu <= ~swapReqToggleCpu;
+                    if (cfg_wdata[1])
+                        softFrameToggleCpu <= ~softFrameToggleCpu;
+                end
+            end
         end
     end
 
     always @* begin
         case (cfg_addr[5:2])
-            4'd0:    cfg_rdata = PHY_FREQ_HZ;
-            4'd1:    cfg_rdata = {28'd0, init1SyncCpu, init0SyncCpu,
-                                  busySyncCpu, initDoneCpu};
-            4'd2:    cfg_rdata = {28'd0, ckPhaseR};
-            4'd3:    cfg_rdata = 32'h5053_5246; // "PSRF": fixed latency rev F
-            4'd4:    cfg_rdata = {16'd0, ckpCntSync};
-            4'd5:    cfg_rdata = 32'h0080_0000; // total CPU-visible bytes
+            4'd0: cfg_rdata = PHY_FREQ_HZ;
+            4'd1: cfg_rdata = {23'd0, hdmiSyncCpu, gpuSyncCpu,
+                               backSyncCpu, frontSyncCpu, pendingSyncCpu,
+                               init1SyncCpu, init0SyncCpu,
+                               busySyncCpu, initDoneCpu};
+            4'd2: cfg_rdata = {28'd0, ckPhaseR};
+            4'd3: cfg_rdata = 32'h5053_5253; // "PSRS": PSRAM switcher
+            4'd4: cfg_rdata = {16'd0, ckpCntSync};
+            4'd5: cfg_rdata = 32'h0040_0000; // CPU-visible logical back bytes
+            4'd6: cfg_rdata = {swapCountCpu, 12'd0, pendingSyncCpu,
+                               backSyncCpu, frontSyncCpu, pendingSyncCpu};
+            4'd7: cfg_rdata = 32'h0080_0000; // total physical PSRAM bytes
             default: cfg_rdata = 32'd0;
         endcase
     end
 
+    wire unusedPhysicalSwapCount = ^switchSwapCount;
 endmodule
 
 `default_nettype wire

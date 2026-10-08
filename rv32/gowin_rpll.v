@@ -17,17 +17,17 @@
 //   fPFD    = fCLKIN / (IDIV_SEL+1) = 50 / 5 = 10MHz     （要求 3~400MHz）
 //   fCLKOUTD = fCLKOUT / 2 = 40MHz（CPU / 总线）
 //
-// clkoutp 是给 PSRAM 送 CK 用的相移时钟。PSDA = 4 -> 90 度，这是关键：
+// clkoutp 是给 PSRAM 送 CK 用的相移时钟。PSDA 每级为 22.5 度；当前实测
+// 通过窗口是 2..7，默认取中点 PSDA = 5（112.5 度）：
 // PSRAM 在 CK 沿上收发数据，FPGA 用自己的时钟采样，CK 必须相对 fabric 时钟
-// 偏 90 度，采样点才落在数据眼中间。之前写成 2（45 度）时读数全是乱的，
-// 而且怎么扫 rdLat 都对不上——rdLat 只能按整拍挪，挪不了这半拍以内的事。
+// 落在合适的数据眼位置。rdLat 只能按整拍挪，不能替代这个拍内相位调整。
 // 这个值抄的是能跑通的 1:1 开源设计（dominicbeesley/psram-tang-nano-9k）。
 //------------------------------------------------------------------------------
 `timescale 1ns / 1ps
 
 module Gowin_rPLL (
     output clkout,      // 80MHz -> PSRAM PHY
-    output clkoutp,     // 80MHz/90度相移 -> PSRAM CK
+    output clkoutp,     // 80MHz动态相移 -> PSRAM CK
     output clkoutd,     // 40MHz -> CPU / 总线
     output lock,
     input  clkin,       // 50MHz 晶振
@@ -71,9 +71,9 @@ defparam rpll_inst.DYN_FBDIV_SEL    = "false";
 defparam rpll_inst.FBDIV_SEL        = 7;        // FBDIV = 8 -> 50*8/5 = 80MHz
 defparam rpll_inst.DYN_ODIV_SEL     = "false";
 defparam rpll_inst.ODIV_SEL         = 8;        // fVCO = 640MHz
-defparam rpll_inst.PSDA_SEL         = "0100";   // dynamic mode上电由寄存器给4
+defparam rpll_inst.PSDA_SEL         = "0101";   // static fallback: measured center tap 5
 defparam rpll_inst.DYN_DA_EN        = "true";
-defparam rpll_inst.DUTYDA_SEL       = "1100";   // static fallback: PSDA+8
+defparam rpll_inst.DUTYDA_SEL       = "1101";   // static fallback: PSDA+8
 defparam rpll_inst.CLKOUT_FT_DIR    = 1'b1;
 defparam rpll_inst.CLKOUTP_FT_DIR   = 1'b1;
 defparam rpll_inst.CLKOUT_DLY_STEP  = 0;

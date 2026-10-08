@@ -9,8 +9,9 @@
 //   - irq_n 按键经消抖后产生一个时钟周期的脉冲，接到 PicoRV32 的 irq bit 3
 //     （hostutil 里的 IRQ_CH0），固件侧由 IRQ_Ch0_Handler() 处理；
 //   - 50MHz 晶振经 rPLL 产生 CPU 40MHz、PSRAM PHY 80MHz；
-//   - PSRAM 8 MiB 数据窗口 0x0200_0000~0x027f_ffff，两个 4 MiB die 分 bank；
-//   - PSRAM 诊断窗口 0x0300_0000，提供初始化、PHY 状态和时钟信息；
+//   - PSRAM 4 MiB 逻辑后台窗口 0x0200_0000~0x023f_ffff；
+//   - 两个物理 die 由 front/back switcher 管理，MMIO 在帧边界请求交换；
+//   - PSRAM 诊断窗口 0x0300_0000，提供初始化、相位和交换控制；
 //   - 不实例化 SPI Flash。
 //
 // reset_n、start、irq_n 都是低有效物理按键：默认上拉为 1，按下接地为 0。
@@ -43,12 +44,12 @@ module rv32top #(
     output wire        trap
 );
     // ---------------------------------------------------------------- 时钟
-    // 50MHz -> 80MHz PHY + 80MHz/90度 PSRAM CK + 40MHz CPU
+    // 50MHz -> 80MHz PHY + 80MHz动态相移 PSRAM CK + 40MHz CPU
     wire       sysClk;
     wire       psramClk;
     wire       psramClkP;
     wire       pllLock;
-    wire [3:0] psramCkPhase;   // 上电为4，固件训练后驱动rPLL动态相位
+    wire [3:0] psramCkPhase;   // 上电为5，固件可训练后驱动rPLL动态相位
 
     Gowin_rPLL sysPll (
         .clkout  (psramClk),
@@ -357,6 +358,16 @@ module rv32top #(
     // ---------------------------------------------------------------------
     // 内嵌 PSRAM
     // ---------------------------------------------------------------------
+    // GPU 和 HDMI 数据端口先保留在控制器边界。当前版本只让软核访问逻辑
+    // back die；后续模块接入时无需再次改动 PHY 或物理 die 映射。
+    wire gpuPsramReady;
+    wire [15:0] gpuPsramRdata;
+    wire gpuPsramDone;
+    wire hdmiPsramReady;
+    wire [15:0] hdmiPsramRdata;
+    wire hdmiPsramDone;
+    wire frameSwapRequest;
+
     psramController #(
         .PHY_FREQ_HZ(PSRAM_CLK_HZ),
         .LATENCY(3)
@@ -371,6 +382,16 @@ module rv32top #(
         .cfg_valid(psramcfg_valid), .cfg_ready(psramcfg_ready),
         .cfg_addr(psramcfg_addr[11:0]), .cfg_wdata(psramcfg_wdata),
         .cfg_wstrb(psramcfg_wstrb), .cfg_rdata(psramcfg_rdata),
+
+        .gpu_valid(1'b0), .gpu_ready(gpuPsramReady), .gpu_wr(1'b0),
+        .gpu_addr(22'd0), .gpu_mask(2'b11), .gpu_wdata(16'd0),
+        .gpu_rdata(gpuPsramRdata), .gpu_done(gpuPsramDone),
+
+        .hdmi_valid(1'b0), .hdmi_ready(hdmiPsramReady),
+        .hdmi_addr(22'd0), .hdmi_rdata(hdmiPsramRdata),
+        .hdmi_done(hdmiPsramDone), .hdmi_frame_done(1'b0),
+        .frame_swap_request(frameSwapRequest),
+
         .ckPhase(psramCkPhase),
 
         .O_psram_ck(O_psram_ck), .O_psram_ck_n(O_psram_ck_n),
@@ -387,7 +408,10 @@ module rv32top #(
                             unmapped_valid, uartIdle,
                             unused_resetPressPulse,
                             unused_startDebounced_n,
-                            unused_irqDebounced_n};
+                            unused_irqDebounced_n, gpuPsramReady,
+                            gpuPsramRdata, gpuPsramDone, hdmiPsramReady,
+                            hdmiPsramRdata, hdmiPsramDone,
+                            frameSwapRequest};
 endmodule
 
 `default_nettype wire

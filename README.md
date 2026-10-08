@@ -1,8 +1,8 @@
 # GW1N-9 PicoRV32 最小系统
 
-这是当前用于先跑通 FPGA、UART 下载和 PicoRV32 的第一版系统。程序通过
-UART 下载到 FPGA 内部程序 BSRAM，按下 `START` 后 CPU 从地址 `0x0000_0000`
-开始执行；这一版尚未接入板外 SPI Flash。
+程序通过 UART 下载到 FPGA 内部程序 BSRAM，按下 `START` 后 CPU 从地址
+`0x0000_0000` 开始执行。系统还直接驱动 GW1NR-9C 的两个片内 x8 PSRAM die，
+组成前台显示缓冲和后台绘制缓冲；没有使用官方 PSRAM IP。
 
 当前内核启用的具体指令和关闭的扩展见 [INSTRUCTION_SET.md](INSTRUCTION_SET.md)。
 
@@ -18,11 +18,16 @@ UART RX -> 裸字节程序加载器 -> 16 KiB 程序 BSRAM
                                       |
               +-----------------------+-----------------------+
               |                       |                       |
-       16 KiB 数据 BSRAM          UART TX MMIO           预留地址窗
+       16 KiB 数据 BSRAM          UART TX MMIO      4 MiB 后台 PSRAM 窗口
+                                                               |
+                                         CPU / GPU -> switcher <- HDMI
+                                                        |   |
+                                                     PHY0   PHY1
 ```
 
-整个设计只使用一根 `clock50MHz` 时钟。UART 收发模块使用计数器产生时钟使能，
-没有生成新的分频时钟。
+50 MHz 板载晶振经一个 rPLL 产生 40 MHz CPU/总线时钟、80 MHz PSRAM PHY
+时钟以及可动态调相的 80 MHz PSRAM CK。当前实测相位通过窗口为 2..7，默认
+选择窗口中点 5。
 
 ## 目录
 
@@ -39,6 +44,9 @@ GW1N-9_rv32/
 │   ├── rv32top.v            # 当前 FPGA 顶层
 │   ├── busMember/
 │   │   ├── busManager.v     # 地址译码与 native bus 路由
+│   │   ├── psramController.v # CPU 32 位访问、跨时钟和 PSRAM 配置寄存器
+│   │   ├── psramSwitcher.v   # front/back die 交换与 CPU/GPU 仲裁
+│   │   ├── psramPhy.v        # 单个 x8 die 的 CA/RWDS/DDR PHY 状态机
 │   │   ├── uartProgramMemory.v # 16 KiB UART 装载程序 BSRAM
 │   │   ├── rv32RegisterRam.v   # 16 KiB 数据 BSRAM
 │   │   ├── UARTRX.v         # 50 MHz / 115200 / 8-N-1 接收器
@@ -67,6 +75,9 @@ GW1N-9_rv32/
 rv32/rv32top.v
 rv32/picorv32.v
 rv32/busMember/busManager.v
+rv32/busMember/psramController.v
+rv32/busMember/psramSwitcher.v
+rv32/busMember/psramPhy.v
 rv32/busMember/uartProgramMemory.v
 rv32/busMember/rv32RegisterRam.v
 rv32/busMember/UARTRX.v
@@ -101,12 +112,19 @@ create_clock -name clock50MHz -period 20.000 \
 | `0x0000_0000`–`0x0000_3fff` | 16 KiB | UART 装载的程序 BSRAM，只供 CPU 读取 |
 | `0x0000_4000`–`0x0000_7fff` | 16 KiB | 数据 BSRAM |
 | `0x0100_0000`–`0x0100_ffff` | 64 KiB | MMIO 窗口 |
-| `0x0200_0000`–`0x023f_ffff` | 4 MiB | 预留，当前读取为 0、写入丢弃 |
+| `0x0200_0000`–`0x023f_ffff` | 4 MiB | 当前后台 die 的逻辑 PSRAM 窗口 |
+| `0x0300_0000`–`0x0300_0fff` | 4 KiB | PSRAM 状态、相位和换帧控制 |
 
 PicoRV32 的复位入口是 `0x0000_0000`，初始栈顶配置为 `0x0000_8000`。
 程序区和数据区各为 `4096 x 32 bit`，两者都带有 Gowin
 `syn_ramstyle="block_ram"` 推导属性。存储数组本身不会在复位时清零，以免
 破坏 BSRAM 推导；软件不能读取尚未写入的数据 RAM。
+
+PSRAM 两个物理 die 各为 4 MiB。HDMI 端独占逻辑前台 die；CPU 与预留 GPU
+端口共享逻辑后台 die，GPU 在事务边界拥有更高优先级。向 `0x0300_0018`
+写 bit 0 只挂起交换请求，只有 HDMI 给出一帧完成脉冲、在途事务全部结束后，
+switcher 才原子翻转 front/back 映射。没有 HDMI 时可同时写 bit 1 注入软件
+帧完成脉冲做上板测试；详细寄存器定义见 `hostutil/include/PSRAM.h`。
 
 ## UART TX MMIO
 

@@ -86,6 +86,23 @@ module tb_psramController;
     reg [3:0] cfg_wstrb = 4'd0;
     wire [31:0] cfg_rdata;
 
+    reg gpu_valid = 1'b0;
+    wire gpu_ready;
+    reg gpu_wr = 1'b0;
+    reg [21:0] gpu_addr = 22'd0;
+    reg [1:0] gpu_mask = 2'b11;
+    reg [15:0] gpu_wdata = 16'd0;
+    wire [15:0] gpu_rdata;
+    wire gpu_done;
+
+    reg hdmi_valid = 1'b0;
+    wire hdmi_ready;
+    reg [21:0] hdmi_addr = 22'd0;
+    wire [15:0] hdmi_rdata;
+    wire hdmi_done;
+    reg hdmi_frame_done = 1'b0;
+    wire frame_swap_request;
+
     wire [3:0] phase;
     wire [1:0] ck, ck_n, cs_n, psreset_n;
     wire [1:0] rwds;
@@ -97,6 +114,13 @@ module tb_psramController;
         .mem_wdata(mem_wdata), .mem_wstrb(mem_wstrb), .mem_rdata(mem_rdata),
         .cfg_valid(cfg_valid), .cfg_ready(cfg_ready), .cfg_addr(cfg_addr),
         .cfg_wdata(cfg_wdata), .cfg_wstrb(cfg_wstrb), .cfg_rdata(cfg_rdata),
+        .gpu_valid(gpu_valid), .gpu_ready(gpu_ready), .gpu_wr(gpu_wr),
+        .gpu_addr(gpu_addr), .gpu_mask(gpu_mask), .gpu_wdata(gpu_wdata),
+        .gpu_rdata(gpu_rdata), .gpu_done(gpu_done),
+        .hdmi_valid(hdmi_valid), .hdmi_ready(hdmi_ready),
+        .hdmi_addr(hdmi_addr), .hdmi_rdata(hdmi_rdata),
+        .hdmi_done(hdmi_done), .hdmi_frame_done(hdmi_frame_done),
+        .frame_swap_request(frame_swap_request),
         .ckPhase(phase), .O_psram_ck(ck), .O_psram_ck_n(ck_n),
         .O_psram_cs_n(cs_n), .O_psram_reset_n(psreset_n),
         .IO_psram_rwds(rwds), .IO_psram_dq(dq)
@@ -165,10 +189,10 @@ module tb_psramController;
         wait (dut.initDoneCpu);
         repeat (3) @(negedge clk);
 
-        if (phase !== 4'd4)
-            $fatal(1, "phase did not reset to 90 degrees");
+        if (phase !== 4'd5)
+            $fatal(1, "phase did not reset to trained tap 5");
 
-        // Last word in bank 0: two ordered halfword writes to die 0.
+        // The only CPU-visible window initially maps to back die 0.
         base0 = dut.phy0.requestCount;
         base1 = dut.phy1.requestCount;
         transact(32'h003f_fffc, 32'h1122_3344, 4'b1111);
@@ -180,47 +204,64 @@ module tb_psramController;
             dut.phy0.logData[base0+1] !== 16'h1122 ||
             dut.phy0.logMask[base0] !== 2'b00 ||
             dut.phy0.logMask[base0+1] !== 2'b00)
-            $fatal(1, "bank 0 full-word split failed");
+            $fatal(1, "logical back window did not route to die 0");
 
-        // First word in bank 1 must restart at physical die address zero.
+        // MMIO request + software frame boundary flips only the ownership map.
+        cfg_write(12'h018, 32'h0000_0003);
+        wait (dut.swapCountCpu == 16'd1);
+        repeat (3) @(negedge clk);
+        cfg_read(12'h018, 32'h0001_0004); // front=0, back=1, no pending
+
+        // The same logical CPU address now reaches physical die 1.
         base0 = dut.phy0.requestCount;
         base1 = dut.phy1.requestCount;
-        transact(32'h0040_0000, 32'ha1b2_c3d4, 4'b1111);
+        transact(32'h0000_0000, 32'ha1b2_c3d4, 4'b1111);
         if (dut.phy0.requestCount != base0 ||
             dut.phy1.requestCount != base1 + 2 ||
             dut.phy1.logAddr[base1] !== 22'h000000 ||
             dut.phy1.logAddr[base1+1] !== 22'h000002)
-            $fatal(1, "bank 1 base decode failed");
+            $fatal(1, "swapped logical window did not route to die 1");
 
-        // Byte lane 2 in bank 1: skip low half and preserve the other byte.
+        // Byte lane 2: skip the low half and preserve the other byte.
         base1 = dut.phy1.requestCount;
-        transact(32'h0040_0100, 32'ha1b2_c3d4, 4'b0100);
+        transact(32'h0000_0100, 32'ha1b2_c3d4, 4'b0100);
         if (dut.phy1.requestCount != base1 + 1 ||
             dut.phy1.logAddr[base1] !== 22'h000102 ||
             dut.phy1.logData[base1] !== 16'ha1b2 ||
             dut.phy1.logMask[base1] !== 2'b10)
             $fatal(1, "bank 1 upper byte-lane write failed");
 
-        // Reads concatenate both halfwords and return data from the right die.
+        // Reads concatenate both halfwords from the currently selected back die.
         base1 = dut.phy1.requestCount;
-        transact(32'h0040_0300, 32'd0, 4'b0000);
+        transact(32'h0000_0300, 32'd0, 4'b0000);
         expectedRead = 32'h8355_8155;
         if (dut.phy1.requestCount != base1 + 2 ||
             dut.phy1.logWr[base1] !== 1'b0 ||
             dut.phy1.logWr[base1+1] !== 1'b0 ||
             mem_rdata !== expectedRead)
-            $fatal(1, "bank 1 read/CDC failed: %08x", mem_rdata);
+            $fatal(1, "swapped die read/CDC failed: %08x", mem_rdata);
+
+        // Request alone is sticky and must not swap before a frame boundary.
+        cfg_write(12'h018, 32'h0000_0001);
+        repeat (12) @(negedge clk);
+        if (!frame_swap_request || dut.swapCountCpu != 16'd1)
+            $fatal(1, "swap request did not wait for frame boundary");
+        cfg_write(12'h018, 32'h0000_0002);
+        wait (dut.swapCountCpu == 16'd2);
+        repeat (3) @(negedge clk);
+        cfg_read(12'h018, 32'h0002_0002); // front=1, back=0, no pending
 
         cfg_read(12'h000, 32'd80_000_000);
-        cfg_read(12'h008, 32'd4);
+        cfg_read(12'h008, 32'd5);
         cfg_write(12'h008, 32'd11);
         cfg_read(12'h008, 32'd11);
         if (phase !== 4'd11)
             $fatal(1, "dynamic phase write failed");
-        cfg_read(12'h00c, 32'h5053_5246);
-        cfg_read(12'h014, 32'h0080_0000);
+        cfg_read(12'h00c, 32'h5053_5253);
+        cfg_read(12'h014, 32'h0040_0000);
+        cfg_read(12'h01c, 32'h0080_0000);
 
-        $display("PASS: dual-die PSRAM banks, 2:1 CDC, masks and handshake");
+        $display("PASS: logical back window, frame swap, CDC, masks and handshake");
         $finish;
     end
 endmodule

@@ -1,85 +1,114 @@
-# 双 die PSRAM 与 720p 帧缓冲规划
+# PSRAM front/back die switcher
 
-## 当前已实现
+## Memory organization
 
-PicoRV32 可见的 PSRAM 窗口为 `0x0200_0000`–`0x027f_ffff`，共 8 MiB：
+The two embedded x8 dies remain physically independent:
 
-| CPU 地址 | PSRAM die | 容量 |
-|---|---:|---:|
-| `0x0200_0000`–`0x023f_ffff` | die 0 | 4 MiB |
-| `0x0240_0000`–`0x027f_ffff` | die 1 | 4 MiB |
+| Physical die | Capacity | PHY |
+|---|---:|---|
+| die 0 | 4 MiB | `psramPhy phy0` |
+| die 1 | 4 MiB | `psramPhy phy1` |
 
-两个 die 各有一套独立的 CK、CS、RWDS 和 8 位 DQ PHY。CPU 的 32 位访问在选中的
-die 内拆成两个 16 位事务；`sb/sh/sw` 通过 RWDS 写掩码保持正确的字节语义。
+Software no longer sees one contiguous 8 MiB region.  It sees one logical
+4 MiB back-buffer window at `0x0200_0000`–`0x023f_ffff`.  `psramSwitcher`
+maps that window to whichever physical die is currently back.  HDMI owns the
+opposite, front die.
 
-- CPU / 总线：40 MHz
-- 两路 PSRAM PHY：80 MHz，latency 3
-- PSRAM CK：80 MHz、上电相位 4（90 度），固件可在 16 个 `PSDA` tap 中训练
-- CPU 与 PHY：request/ack toggle 跨时钟握手
-- CR0：`0x9FEF`，35 Ω drive、固定 2× latency
-- 复位释放后等待 160 us，再分别初始化两颗 die
-
-PicoRV32 启用了原生 `TWO_CYCLE_ALU` 和 `TWO_CYCLE_COMPARE`，使双 PHY 加入后 CPU
-仍能在 40 MHz 下通过时序。当前布局布线报告中 CPU 40 MHz、PHY 80 MHz 均无
-setup/hold 违例。
-
-## 为什么使用两个独立 bank
-
-目标显示模式是 1280×720、60 Hz、RGB565。一帧大小为：
+Reset ownership is:
 
 ```text
-1280 × 720 × 2 = 1,843,200 bytes
+front = die 1   (future HDMI)
+back  = die 0   (CPU/GPU)
 ```
 
-每颗 4 MiB die 都能单独放下一整帧。后续显示控制器采用 bank ping-pong：
+A swap changes only these two ownership bits.  It does not copy memory.
 
-- HDMI/DMA 始终只读 front die；
-- CPU/MMIO 写入引擎始终只写 back die；
-- CPU 没有提交新帧时，HDMI 重复扫描当前 front die；
-- back die 写满并提交后，只在垂直消隐/帧边界交换 front/back；
-- 两颗 die 的读写物理独立，因此显示扫描与软核准备下一帧可以真正并行。
+## Clock and PHY configuration
 
-这比把相邻字或半字交错到两个 die 更适合无撕裂双缓冲。
+- CPU, MMIO and normal bus: 40 MHz
+- two PSRAM PHYs: 80 MHz
+- PSRAM CK: 80 MHz with dynamic rPLL phase
+- default phase: tap 5, from the measured common pass window 2..7
+- CR0: `0x9FEF`, latency 3, fixed 2x latency, 35-ohm drive
+- power-up: each PHY waits 160 us and configures its own die
 
-## HDMI 阶段需要增加的接口
+Each CPU 32-bit load/store is split into one or two 16-bit commands.  The
+switcher includes a CPU sequence lock, so a frame boundary cannot move the
+second halfword of a 32-bit access to the other die.
 
-当前 CPU 数据窗口仍是非突发调试路径，不能直接持续供应 720p60。RGB565 的平均
-有效像素读取量约为 110.6 MB/s；80 MHz 单 die 的 x8 DDR 数据阶段理论值为
-160 MB/s，因此视频端必须使用长突发和行缓冲摊薄 CA/latency 开销。
+## Logical clients
 
-计划的视频数据路径：
+`psramSwitcher` has three clients, all currently expressed as single-word
+16-bit command ports in the 80 MHz domain:
 
-1. front die 使用 128-byte 对齐读突发；
-2. 每行 2560 bytes，正好是 20 个 128-byte 块；
-3. 两个 2560-byte BSRAM 行缓冲交替填充/显示；
-4. 74.25 MHz 像素域只读取行缓冲，不直接等待 PSRAM；
-5. 垂直消隐期间预取首行，并在帧边界处理 bank swap。
+- HDMI exclusively accesses front;
+- GPU and CPU share back;
+- GPU has priority when GPU and CPU become valid at the same command boundary;
+- an already accepted CPU transaction is never pre-empted;
+- HDMI and the selected CPU/GPU client may access opposite dies concurrently.
 
-计划的软核 MMIO 是流式写入口，而不是把整个 PSRAM 暴露成普通低延迟 RAM：
+The top level ties the future GPU and HDMI ports inactive for now.  CPU-only
+bring-up therefore exercises back through the normal PicoRV32 memory window.
 
-- `FRAME_DATA`：写两个 RGB565 像素（32 bit），满时通过总线 backpressure；
-- `FRAME_STATUS`：back bank、已接收字节数、FIFO/写引擎状态；
-- `FRAME_COMMIT`：仅在完整收到 1,843,200 bytes 且写 FIFO 排空后接受；
-- `FRAME_ID`：提交号和实际显示号，供软件确认交换完成。
+## Frame swap handshake
 
-## 诊断寄存器
+The CPU writes `SWAP_REQUEST`.  The request remains pending and
+`frame_swap_request` remains high until HDMI reports `hdmi_frame_done`.
+The switcher then blocks new commands, drains accepted physical and logical
+transactions, and atomically flips front/back.
 
-诊断窗口位于 `0x0300_0000`：
+Before HDMI exists, MMIO bit 1 injects a software frame-done event so both
+physical dies can be tested through the one logical window.
 
-| 偏移 | 内容 |
-|---:|---|
-| `0x00` | PHY 频率，当前 `80_000_000` |
-| `0x04` | bit0=双 die ready，bit1=busy，bit2=die0 ready，bit3=die1 ready |
-| `0x08` | CK 动态相位；低 4 bit 可读写，复位值为 4 |
-| `0x0c` | 版本戳 `0x50535246`（`PSRF`，固定 latency） |
-| `0x10` | `clk_p` 活性计数 |
-| `0x14` | CPU 可见容量，`0x00800000` |
+## Configuration window
 
-测试固件先逐一扫描 16 个相位。每个相位在两颗 die 上各测试 128 KiB、两套互补
-地址相关图案，然后从两颗 die 共同通过的最长连续相位窗口选择中心 tap。训练会覆盖
-每颗 die 开头的 128 KiB，必须在帧缓冲或应用数据写入前运行。随后固件再检查两颗
-die 的边界、所有字节/半字通道以及完整 8 MiB 地址相关图案；成功时最后输出
-`full 8 MiB: PASS`。
+The configuration window remains at `0x0300_0000`:
 
-PHY 参考：<https://github.com/zf3/psram-tang-nano-9k>（Apache-2.0）。80 MHz
-驱动强度修正来自该项目 pull request #10。
+| Offset | Access | Description |
+|---:|---|---|
+| `0x00` | R | PHY frequency, `80_000_000` |
+| `0x04` | R | init/busy/die-ready/swap/front/back/GPU/HDMI status |
+| `0x08` | R/W | rPLL phase tap, reset value 5 |
+| `0x0c` | R | version `0x50535253` (`PSRS`) |
+| `0x10` | R | phase-clock activity counter |
+| `0x14` | R | CPU-visible logical bytes, `0x0040_0000` |
+| `0x18` | R/W | swap status/control |
+| `0x1c` | R | total physical bytes, `0x0080_0000` |
+
+`0x18` writes:
+
+```text
+bit 0 = request swap at the next HDMI frame boundary
+bit 1 = inject frame-done for pre-HDMI testing only
+```
+
+`0x18` reads:
+
+```text
+bit 0      = swap pending
+bit 1      = physical front die
+bit 2      = physical back die
+bit 3      = request level presented to HDMI
+bits 31:16 = completed swap count
+```
+
+## Firmware bring-up
+
+The current firmware uses the software frame-done bit to:
+
+1. train all 16 phases through both physical dies;
+2. test byte/halfword lanes and 4 MiB boundaries on both dies;
+3. write different values at the same logical address on each die and verify
+   that swapping preserves both values;
+4. run a full 4 MiB write/read test on die 0 and then die 1.
+
+The `.psram` linker section is `NOLOAD` and is limited to the logical 4 MiB
+back window.  Firmware cannot directly address the front die; it must request a
+frame-boundary swap first.
+
+## HDMI follow-up
+
+The placeholder HDMI word port is not fast enough for 720p60.  The next stage
+will add a burst reader and asynchronous line FIFO above the front port.  The
+GPU placeholder will similarly become a burst writer on back; its existing
+priority over the CPU is already enforced at the switcher boundary.

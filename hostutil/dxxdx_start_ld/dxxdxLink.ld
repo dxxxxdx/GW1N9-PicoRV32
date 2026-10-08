@@ -8,7 +8,7 @@ ENTRY(_start)
  * 0x0000_0000 - 0x0000_00ff: IRQ entry, padded (PROGADDR_IRQ, see vectors.S)
  * 0x0000_0100 - 0x0000_3fff: _start, .text / .rodata and the .data load image
  * 0x0000_4000 - 0x0000_7fff: data BSRAM
- * 0x0200_0000 - 0x027f_ffff: PSRAM 8 MiB data window  (.psram)
+ * 0x0200_0000 - 0x023f_ffff: logical PSRAM back die, 4 MiB (.psram)
  * 0x0300_0000 - 0x0300_0fff: PSRAM config window    (__psram_cfg_base)
  *
  * There is no external SPI flash in the current system. Initialized data is
@@ -23,7 +23,7 @@ MEMORY
 {
     PROGRAM_RAM (rx)  : ORIGIN = 0x00000000, LENGTH = 16K
     DATA_RAM    (rw)  : ORIGIN = 0x00004000, LENGTH = 16K
-    PSRAM       (rw)  : ORIGIN = 0x02000000, LENGTH = 8M
+    PSRAM       (rw)  : ORIGIN = 0x02000000, LENGTH = 4M
     PSRAM_CFG   (rw)  : ORIGIN = 0x03000000, LENGTH = 4K
 }
 
@@ -140,7 +140,7 @@ SECTIONS
     } > DATA_RAM
 
     /*
-     * PSRAM 数据窗口，8 MiB。NOLOAD：不产生加载镜像，_start 也不会去初始化
+     * PSRAM 逻辑后台窗口，4 MiB。NOLOAD：不产生加载镜像，_start 也不会初始化
      * 它，放这里的变量必须由代码自己初始化。
      *
      *   __attribute__((section(".psram"))) uint32_t frame[1024];
@@ -186,7 +186,7 @@ SECTIONS
     ASSERT((__psram_start & 3) == 0,
            ".psram must start 4-byte aligned")
     ASSERT(__psram_end <= __psram_limit,
-           "PSRAM overflow: .psram does not fit in the 8 MiB window")
+           "PSRAM overflow: .psram does not fit in the 4 MiB back-buffer window")
     ASSERT(__stack_top == ORIGIN(DATA_RAM) + LENGTH(DATA_RAM),
            "stack does not end at the top of DATA_RAM")
 }
