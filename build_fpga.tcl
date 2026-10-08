@@ -10,9 +10,10 @@ set_option -verilog_std v2001
 set_option -gen_text_timing_rpt 1
 set_option -print_all_synthesis_warning 1
 set_option -timing_driven 1
-# Route option 1 spends a little more time on timing-critical paths.  The
-# design runs 80 MHz PSRAM and 126.667 MHz OSER clocks concurrently.
-set_option -route_option 1
+# Higher-effort placement/routing is needed because the design runs 80 MHz
+# PSRAM and 126.667 MHz OSER clocks concurrently.
+set_option -place_option 1
+set_option -route_option 2
 
 # irq_n is on the package's multiplexed SSPI pin 56.
 set_option -use_sspi_as_gpio 1

@@ -39,7 +39,7 @@ extern uint8_t __psram_end[];
 #define PSRAM_PHYS_BYTES_REG (*(volatile uint32_t *)(PSRAM_CFG_BASE + 0x1cu))
 #define PSRAM_HDMI_CTRL_REG (*(volatile uint32_t *)(PSRAM_CFG_BASE + 0x20u))
 
-#define PSRAM_MAGIC_EXPECTED     0x50534231u  // "PSB1": burst-port ABI v1
+#define PSRAM_MAGIC_EXPECTED     0x50534232u  // "PSB2": CR0 128-byte bursts
 #define PSRAM_STATUS_INIT_DONE   (1u << 0)
 #define PSRAM_STATUS_PHY_BUSY    (1u << 1)
 #define PSRAM_STATUS_DIE0_READY  (1u << 2)
@@ -94,8 +94,8 @@ static inline void PSRAM_RequestSwap(void)
     PSRAM_SWAP_REG = PSRAM_SWAP_REQUEST;
 }
 
-// Bring-up path before HDMI exists: request and inject a safe frame boundary.
-static inline void PSRAM_TestSwap(void)
+// Boot path before HDMI is running: request and inject a frame boundary.
+static inline void PSRAM_BootSwap(void)
 {
     PSRAM_SWAP_REG = PSRAM_SWAP_REQUEST | PSRAM_SWAP_SOFT_FRAME_DONE;
 }

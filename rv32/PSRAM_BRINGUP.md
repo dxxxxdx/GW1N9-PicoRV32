@@ -29,7 +29,7 @@ A swap changes only these two ownership bits.  It does not copy memory.
 - two PSRAM PHYs: 80 MHz
 - PSRAM CK: 80 MHz with dynamic rPLL phase hardware
 - startup phase: fixed tap 5, the measured common pass-window center (2..7)
-- CR0: `0x9FEF`, latency 3, fixed 2x latency, 35-ohm drive
+- CR0: `0x9FEC`, 128-byte burst, latency 3, fixed 2x latency, 35-ohm drive
 - power-up: each PHY waits 160 us and configures its own die
 
 Each CPU 32-bit load/store becomes one two-beat physical burst: CA is sent
@@ -81,7 +81,7 @@ The configuration window remains at `0x0300_0000`:
 | `0x00` | R | PHY frequency, `80_000_000` |
 | `0x04` | R | init/busy/die-ready/swap/front/back/GPU/HDMI status |
 | `0x08` | R/W | rPLL phase tap, reset value 5 |
-| `0x0c` | R | version `0x50534231` (`PSB1`, burst-port ABI v1) |
+| `0x0c` | R | version `0x50534232` (`PSB2`, explicit 128-byte CR0 burst) |
 | `0x10` | R | phase-clock activity counter |
 | `0x14` | R | CPU-visible logical bytes, `0x0040_0000` |
 | `0x18` | R/W | swap status/control |
@@ -105,15 +105,13 @@ bit 3      = request level presented to HDMI
 bits 31:16 = completed swap count
 ```
 
-## Firmware bring-up
+## Firmware startup
 
-The current firmware writes the characterized phase tap 5 from `start.S`, then
-uses the software frame-done bit to:
-
-1. test byte/halfword lanes and 4 MiB boundaries on both dies;
-2. write different values at the same logical address on each die and verify
-   that swapping preserves both values;
-3. run a full 4 MiB write/read test on die 0 and then die 1.
+The current firmware writes the characterized phase tap 5 from `start.S` and
+does not run destructive lane, full-memory, or swap-stress tests.  It draws the
+two color-bar framebuffers, uses one software-injected frame boundary to reach
+the other physical die before HDMI starts, then enables normal HDMI-driven
+front/back swaps.
 
 The `.psram` linker section is `NOLOAD` and is limited to the logical 4 MiB
 back window.  Firmware cannot directly address the front die; it must request a

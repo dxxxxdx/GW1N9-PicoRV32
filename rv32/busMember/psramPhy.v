@@ -160,9 +160,12 @@ module psramPhy #(
 
                 S_CONFIG: begin
                     if (cyclesSr[0]) begin
+                        // CR0[1:0]=00 selects a 128-byte wrapped group.  The
+                        // normal CA requests linear bursts as well, so a
+                        // 64-beat HDMI command is safe under either decoding.
                         dqSr     <= {8'h60, 8'h00, 8'h01, 8'h00,
                                      8'h00, 8'h00, 8'h9f,
-                                     CR_LATENCY, 4'hf};
+                                     CR_LATENCY, 4'hc};
                         dqOen    <= 1'b0;
                         ckEnable <= 1'b1;
                     end

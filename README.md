@@ -146,7 +146,8 @@ PHY、switcher 与 GPU/HDMI 端口统一使用 1..64 个 16-bit beat 的
 突发接口（最大 128 字节）。CPU 的一次 `lw/sw` 只发送一次 CA，随后用两个
 连续的低 16 位 beat 完成；32 位拆分和拼接留在 CPU bridge 内，软件看到的
 访问语义不变。读突发启动后不能反压，因此 HDMI DMA 只有在异步 FIFO 能容纳
-完整 64-beat 突发时才发命令。
+完整 64-beat 突发时才发命令。PHY 上电写 CR0=`0x9FEC`，把器件的回绕长度也
+明确设为 128 字节，避免默认 32 字节组在长事务中重复四次。
 
 ## HDMI framebuffer
 

@@ -233,7 +233,7 @@ module tb_psramController;
         repeat (3) @(negedge clk);
 
         if (phase !== 4'd5)
-            $fatal(1, "phase did not reset to trained tap 5");
+            $fatal(1, "phase did not reset to fixed tap 5");
 
         // The only CPU-visible window initially maps to back die 0.
         base0 = dut.phy0.requestCount;
@@ -307,7 +307,7 @@ module tb_psramController;
         cfg_read(12'h008, 32'd11);
         if (phase !== 4'd11)
             $fatal(1, "dynamic phase write failed");
-        cfg_read(12'h00c, 32'h5053_4231);
+        cfg_read(12'h00c, 32'h5053_4232);
         cfg_read(12'h014, 32'h0040_0000);
         cfg_read(12'h01c, 32'h0080_0000);
         cfg_read(12'h020, 32'd0);

@@ -504,7 +504,7 @@ module psramController #(
                                init1SyncCpu, init0SyncCpu,
                                busySyncCpu, initDoneCpu};
             4'd2: cfg_rdata = {28'd0, ckPhaseR};
-            4'd3: cfg_rdata = 32'h5053_4231; // "PSB1": burst-port ABI v1
+            4'd3: cfg_rdata = 32'h5053_4232; // "PSB2": CR0 128-byte bursts
             4'd4: cfg_rdata = {16'd0, ckpCntSync};
             4'd5: cfg_rdata = 32'h0040_0000; // CPU-visible logical back bytes
             4'd6: cfg_rdata = {swapCountCpu, 12'd0, pendingSyncCpu,

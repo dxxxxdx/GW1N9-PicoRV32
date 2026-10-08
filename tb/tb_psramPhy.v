@@ -60,6 +60,7 @@ module tb_psramPhy;
     integer writeBeats = 0;
     integer readBeats = 0;
     integer lastCount = 0;
+    reg configSeen = 1'b0;
     time previousTake = 0;
     always @(posedge clk) begin
         if (w_take) begin
@@ -84,11 +85,19 @@ module tb_psramPhy;
         end
     end
 
+    // Capture the CR0 payload after the configuration shifter is loaded.
+    // 0x9FEC means 35-ohm drive, fixed 2x latency, latency 3 and 128 bytes.
+    always @(negedge clk)
+        if (dut.state == 3'd1 && dut.dqSr[15:0] == 16'h9fec)
+            configSeen <= 1'b1;
+
     integer timeout;
     initial begin
         repeat (4) @(negedge clk);
         reset_n = 1'b1;
         wait (initDone && cmd_ready);
+        if (!configSeen)
+            $fatal(1, "PHY did not configure CR0 to 0x9FEC");
 
         @(negedge clk);
         cmd_write = 1'b1;

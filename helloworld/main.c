@@ -3,8 +3,6 @@
 #include "IRQ.h"
 
 #define SWAP_TIMEOUT         1000000u
-#define SWAP_STRESS_WORDS    (16u * 1024u) // 64 KiB checked after every swap
-#define SWAP_STRESS_ROUNDS   256u
 #define HDMI_WIDTH            640u
 #define HDMI_HEIGHT           480u
 #define HDMI_FRAME_BYTES      (HDMI_WIDTH * HDMI_HEIGHT * 2u)
@@ -26,13 +24,13 @@ static void print_result(const char *name, uint32_t got, uint32_t want)
     UART_CStr(got == want ? "  OK\r\n" : "  FAIL\r\n");
 }
 
-static int swap_back_die(void)
+static int swap_before_hdmi(void)
 {
     uint32_t before = PSRAM_GetSwapCount();
 
     // Before HDMI exists, bit1 injects the frame boundary that will later come
     // from the display controller.  The switcher still waits for both PHYs idle.
-    PSRAM_TestSwap();
+    PSRAM_BootSwap();
     for (uint32_t i = 0u; i < SWAP_TIMEOUT; ++i) {
         if (PSRAM_GetSwapCount() != before)
             return 1;
@@ -54,181 +52,13 @@ static int swap_at_hdmi_frame(void)
     return 0;
 }
 
-static int select_back_die(uint32_t die)
+static int select_back_die_before_hdmi(uint32_t die)
 {
     if (PSRAM_GetBackDie() == (die & 1u))
         return 1;
-    if (!swap_back_die())
+    if (!swap_before_hdmi())
         return 0;
     return PSRAM_GetBackDie() == (die & 1u);
-}
-
-static uint32_t test_boundaries(void)
-{
-    static const uint32_t offsets[] = {
-        0x000000u, 0x000004u, 0x000100u,
-        0x0ffffcu, 0x100000u, 0x1ffffcu,
-        0x200000u, 0x2ffffcu, 0x300000u, 0x3ffffcu
-    };
-    uint32_t failures = 0u;
-
-    for (uint32_t i = 0u; i < sizeof(offsets) / sizeof(offsets[0]); ++i) {
-        volatile uint32_t *p = (volatile uint32_t *)(PSRAM_BASE + offsets[i]);
-        *p = 0x6d3a0000u ^ offsets[i] ^ i;
-    }
-
-    for (uint32_t i = 0u; i < sizeof(offsets) / sizeof(offsets[0]); ++i) {
-        volatile uint32_t *p = (volatile uint32_t *)(PSRAM_BASE + offsets[i]);
-        uint32_t want = 0x6d3a0000u ^ offsets[i] ^ i;
-        if (*p != want)
-            ++failures;
-    }
-    return failures;
-}
-
-static uint32_t test_byte_lanes(void)
-{
-    volatile uint32_t *word = PSRAM_U32;
-    volatile uint16_t *half = PSRAM_U16;
-    volatile uint8_t *byte = PSRAM_U8;
-    uint32_t failures = 0u;
-
-    *word = 0x11223344u;
-    byte[0] = 0xa0u;
-    if (*word != 0x112233a0u) ++failures;
-    byte[1] = 0xb1u;
-    if (*word != 0x1122b1a0u) ++failures;
-    byte[2] = 0xc2u;
-    if (*word != 0x11c2b1a0u) ++failures;
-    byte[3] = 0xd3u;
-    if (*word != 0xd3c2b1a0u) ++failures;
-
-    half[0] = 0x5aa5u;
-    if (*word != 0xd3c25aa5u) ++failures;
-    half[1] = 0xa55au;
-    if (*word != 0xa55a5aa5u) ++failures;
-
-    return failures;
-}
-
-static uint32_t test_swap_isolation(void)
-{
-    volatile uint32_t *p = PSRAM_U32 + 16u;
-    uint32_t failures = 0u;
-
-    if (!select_back_die(0u)) return 1u;
-    *p = 0x0d1e0000u;
-    if (!select_back_die(1u)) return 1u;
-    *p = 0x1d1e1111u;
-    if (!select_back_die(0u)) return 1u;
-    if (*p != 0x0d1e0000u) ++failures;
-    if (!select_back_die(1u)) return failures + 1u;
-    if (*p != 0x1d1e1111u) ++failures;
-    if (!select_back_die(0u)) return failures + 1u;
-    return failures;
-}
-
-static uint32_t test_swap_stress(void)
-{
-    static const uint32_t patterns[2] = {0xaaaaaaaau, 0x55555555u};
-
-    UART_CStr("swap stress: fill 64 KiB/die, then swap+verify 256 rounds\r\n");
-
-    // Different byte fills make a wrong logical-to-physical mapping visible:
-    // die0 is all 0xaa while die1 is all 0x55.
-    for (uint32_t die = 0u; die < 2u; ++die) {
-        if (!select_back_die(die)) {
-            UART_CStr("  FAIL: fill swap timeout on die");
-            UART_UInt(die);
-            UART_CStr("\r\n");
-            return 1u;
-        }
-        for (uint32_t i = 0u; i < SWAP_STRESS_WORDS; ++i)
-            PSRAM_U32[i] = patterns[die];
-    }
-
-    // Filling ends on die1, so starting at die0 guarantees that every round
-    // actually crosses the frame-swap barrier and flips the mapping.
-    for (uint32_t round = 0u; round < SWAP_STRESS_ROUNDS; ++round) {
-        uint32_t die = round & 1u;
-        uint32_t want = patterns[die];
-
-        if (!select_back_die(die)) {
-            UART_CStr("  FAIL: swap timeout at round ");
-            UART_UInt(round);
-            UART_CStr("\r\n");
-            return 1u;
-        }
-        if (PSRAM_GetBackDie() != die) {
-            UART_CStr("  FAIL: wrong back die at round ");
-            UART_UInt(round);
-            UART_CStr("\r\n");
-            return 1u;
-        }
-
-        for (uint32_t i = 0u; i < SWAP_STRESS_WORDS; ++i) {
-            uint32_t got = PSRAM_U32[i];
-            if (got != want) {
-                UART_CStr("  FAIL: round=");
-                UART_UInt(round);
-                UART_CStr(" die=");
-                UART_UInt(die);
-                UART_CStr(" offset=0x");
-                UART_Hex32(i * sizeof(uint32_t));
-                UART_CStr(" got=0x");
-                UART_Hex32(got);
-                UART_CStr(" want=0x");
-                UART_Hex32(want);
-                UART_CStr(" swapStatus=0x");
-                UART_Hex32(PSRAM_SWAP_REG);
-                UART_CStr("\r\n");
-                return 1u;
-            }
-        }
-
-        if (((round + 1u) & 31u) == 0u) {
-            UART_CStr("  rounds OK: ");
-            UART_UInt(round + 1u);
-            UART_CStr("\r\n");
-        }
-    }
-
-    if (!select_back_die(0u)) {
-        UART_CStr("  FAIL: final select die0 timeout\r\n");
-        return 1u;
-    }
-    UART_CStr("swap stress: PASS\r\n");
-    return 0u;
-}
-
-static uint32_t test_full_die(uint32_t die)
-{
-    uint32_t bad;
-
-    UART_CStr("full 4 MiB die");
-    UART_UInt(die);
-    UART_CStr(" through logical window...\r\n");
-    if (!select_back_die(die)) {
-        UART_CStr("swap timeout\r\n");
-        return 0u;
-    }
-
-    bad = PSRAM_TestPattern(PSRAM_SIZE / sizeof(uint32_t));
-    if (bad == PSRAM_SIZE / sizeof(uint32_t)) {
-        UART_CStr("  PASS\r\n");
-    } else {
-        UART_CStr("  FAIL at byte offset 0x");
-        UART_Hex32(bad * sizeof(uint32_t));
-        UART_CStr(" want=0x");
-        UART_Hex32(0xa5a50000u ^ bad);
-        UART_CStr("\r\n  rereads:");
-        for (uint32_t i = 0u; i < 8u; ++i) {
-            UART_CStr(" 0x");
-            UART_Hex32(PSRAM_U32[bad]);
-        }
-        UART_CStr("\r\n");
-    }
-    return bad;
 }
 
 static const uint16_t hdmiColors[8] = {
@@ -346,17 +176,11 @@ static void animate_cursor(void)
 int main(void)
 {
     uint32_t status;
-    uint32_t laneFailures = 0u;
-    uint32_t boundaryFailures = 0u;
-    uint32_t swapFailures;
-    uint32_t bad0;
-    uint32_t bad1;
-    uint32_t stressFailures;
 
     IRQ_Init();
     IRQ_Enable(IRQ_CH0);
 
-    UART_CStr("\r\n=== PSRAM front/back die switcher test ===\r\n");
+    UART_CStr("\r\n=== PSRAM double-buffer HDMI demo ===\r\n");
     UART_CStr("PHY: 80 MHz / fixed 2x latency / CPU sees logical back die\r\n");
 
     UART_CStr("MAGIC  = 0x");
@@ -383,49 +207,16 @@ int main(void)
     print_result("physical bytes", PSRAM_PHYS_BYTES_REG, PSRAM_PHYSICAL_SIZE);
     print_result("fixed phase", PSRAM_PHASE_REG, 5u);
 
-    for (uint32_t die = 0u; die < 2u; ++die) {
-        if (!select_back_die(die)) {
-            ++laneFailures;
-            ++boundaryFailures;
-            continue;
-        }
-        laneFailures += test_byte_lanes();
-        boundaryFailures += test_boundaries();
+    UART_CStr("render both 640x480 RGB565 framebuffers...\r\n");
+    if (!select_back_die_before_hdmi(0u)) {
+        UART_CStr("HDMI init failed: cannot select die0\r\n");
+        for (;;) {}
     }
-    select_back_die(0u);
-
-    UART_CStr("byte/halfword lanes, both dies: failures=");
-    UART_UInt(laneFailures);
-    UART_CStr(laneFailures == 0u ? "  OK\r\n" : "  FAIL\r\n");
-    UART_CStr("4 MiB boundaries, both dies: failures=");
-    UART_UInt(boundaryFailures);
-    UART_CStr(boundaryFailures == 0u ? "  OK\r\n" : "  FAIL\r\n");
-
-    swapFailures = test_swap_isolation();
-    UART_CStr("die swap preserves separate contents: failures=");
-    UART_UInt(swapFailures);
-    UART_CStr(swapFailures == 0u ? "  OK\r\n" : "  FAIL\r\n");
-
-    bad0 = test_full_die(0u);
-    bad1 = test_full_die(1u);
-    select_back_die(0u);
-    if (bad0 == PSRAM_SIZE / sizeof(uint32_t) &&
-        bad1 == PSRAM_SIZE / sizeof(uint32_t))
-        UART_CStr("both physical dies: PASS\r\n");
-    else
-        UART_CStr("both physical dies: FAIL\r\n");
-
-    stressFailures = test_swap_stress();
-    UART_CStr("swap stress failures=");
-    UART_UInt(stressFailures);
-    UART_CStr(stressFailures == 0u ? "  OK\r\n" : "  FAIL\r\n");
-
-    UART_CStr("final swap status=0x");
-    UART_Hex32(PSRAM_SWAP_REG);
-    UART_CStr("\r\nrender both 640x480 RGB565 framebuffers...\r\n");
-    select_back_die(0u);
     draw_hdmi_color_bars();
-    select_back_die(1u);
+    if (!select_back_die_before_hdmi(1u)) {
+        UART_CStr("HDMI init failed: cannot select die1\r\n");
+        for (;;) {}
+    }
     draw_hdmi_color_bars();
     if (PSRAM_GetBackDie() == 1u) {
         PSRAM_HDMIEnable();
