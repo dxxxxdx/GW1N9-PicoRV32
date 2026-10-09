@@ -46,7 +46,8 @@ static uint32_t test_rectangle_gpu(void)
 
     // CPU-side PSRAM accesses deliberately use only aligned lw/sw.  The GPU
     // still works in RGB565 pixels; each CPU word below observes two pixels.
-    // 130 pixels crosses two 64-pixel/128-byte burst boundaries.
+    // From x=10, 130 pixels become 54 + 64 + 12 word bursts so that no
+    // transaction crosses a physical 128-byte group boundary.
     frame[(firstRow + 8u) / 2u] = guardPair;
     frame[(firstRow + 140u) / 2u] = guardPair;
     GPU_FillRectangle(10u, 3u, 130u, 2u, burstColor);
@@ -83,7 +84,7 @@ static uint32_t test_rectangle_gpu(void)
 static void draw_hdmi_color_bars(void)
 {
     // Eight MMIO commands replace 153,600 CPU stores.  Each 80-pixel row is
-    // emitted by hardware as one 64-pixel and one 16-pixel PSRAM burst.
+    // split automatically at both 64-pixel and physical 128-byte boundaries.
     for (uint32_t bar = 0u; bar < 8u; ++bar)
         GPU_FillRectangle(bar * (HDMI_WIDTH / 8u), 0u,
                           HDMI_WIDTH / 8u, HDMI_HEIGHT, hdmiColors[bar]);

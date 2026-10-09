@@ -44,7 +44,6 @@ module rectangleGpu #(
     localparam [15:0] FRAME_HEIGHT_U16 = FRAME_HEIGHT;
     localparam [9:0] MAX_BURST_WORDS_U10 = MAX_BURST_WORDS;
     localparam [21:0] STRIDE_BYTES_U22 = STRIDE_BYTES;
-    localparam [21:0] MAX_BURST_BYTES_U22 = MAX_BURST_WORDS * 2;
 
     reg [15:0] xReg, yReg, widthReg, heightReg, colorReg;
     reg [15:0] jobX, jobY, jobWidth, jobHeight, jobColor;
@@ -155,9 +154,18 @@ module rectangleGpu #(
     // 640 RGB565 pixels = 1280 bytes = 1024 + 256, so no multiplier is needed.
     wire [21:0] jobStartAddr = (jobYExt << 10) + (jobYExt << 8) +
                                 (jobXExt << 1);
-    wire [6:0] nextBurstWords =
+    // Although CA requests a linear transaction, the embedded PSRAM is most
+    // robust when no command crosses its configured 128-byte wrap group.
+    // An arbitrary rectangle X can start inside such a group, so shorten the
+    // first burst to the boundary and use full 64-word bursts only afterwards.
+    wire [6:0] wordsTo128Boundary =
+        7'd64 - {1'b0, currentAddr[6:1]};
+    wire [6:0] wordsLimitedByLength =
         wordsLeft > MAX_BURST_WORDS_U10 ?
         MAX_BURST_WORDS_U10[6:0] : wordsLeft[6:0];
+    wire [6:0] nextBurstWords =
+        wordsLimitedByLength > wordsTo128Boundary ?
+        wordsTo128Boundary : wordsLimitedByLength;
 
     assign gpu_cmd_wr = 1'b1;
     assign gpu_w_data = colorPhy;
@@ -264,9 +272,6 @@ module rectangleGpu #(
                 end
 
                 G_PREP: begin
-                    remainingWords <= wordsLeft > MAX_BURST_WORDS_U10 ?
-                                      wordsLeft - MAX_BURST_WORDS_U10 : 10'd0;
-                    nextAddr      <= currentAddr + MAX_BURST_BYTES_U22;
                     gpu_cmd_addr  <= currentAddr;
                     gpu_cmd_words <= nextBurstWords;
                     gpu_cmd_valid <= 1'b1;
@@ -275,6 +280,10 @@ module rectangleGpu #(
 
                 G_ISSUE: begin
                     if (gpu_cmd_valid && gpu_cmd_ready) begin
+                        remainingWords <= wordsLeft -
+                                          {3'd0, gpu_cmd_words};
+                        nextAddr <= currentAddr +
+                                    {14'd0, gpu_cmd_words, 1'b0};
                         gpu_cmd_valid <= 1'b0;
                         gpuState <= G_WAIT;
                     end

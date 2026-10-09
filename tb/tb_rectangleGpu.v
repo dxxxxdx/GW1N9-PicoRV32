@@ -123,13 +123,13 @@ module tb_rectangleGpu;
             $fatal(1, "busy START was queued or job busy did not clear");
         if (commandCount != 6)
             $fatal(1, "130x2 rectangle used %0d commands, expected 6", commandCount);
-        if (loggedAddr[0] !== 22'd3860 || loggedWords[0] !== 7'd64 ||
-            loggedAddr[1] !== 22'd3988 || loggedWords[1] !== 7'd64 ||
-            loggedAddr[2] !== 22'd4116 || loggedWords[2] !== 7'd2 ||
-            loggedAddr[3] !== 22'd5140 || loggedWords[3] !== 7'd64 ||
-            loggedAddr[4] !== 22'd5268 || loggedWords[4] !== 7'd64 ||
-            loggedAddr[5] !== 22'd5396 || loggedWords[5] !== 7'd2)
-            $fatal(1, "row splitting/address generation failed");
+        if (loggedAddr[0] !== 22'd3860 || loggedWords[0] !== 7'd54 ||
+            loggedAddr[1] !== 22'd3968 || loggedWords[1] !== 7'd64 ||
+            loggedAddr[2] !== 22'd4096 || loggedWords[2] !== 7'd12 ||
+            loggedAddr[3] !== 22'd5140 || loggedWords[3] !== 7'd54 ||
+            loggedAddr[4] !== 22'd5248 || loggedWords[4] !== 7'd64 ||
+            loggedAddr[5] !== 22'd5376 || loggedWords[5] !== 7'd12)
+            $fatal(1, "128-byte boundary splitting/address generation failed");
 
         // Clip at the lower-right framebuffer edge: only two pixels survive.
         start_rect(16'd638, 16'd479, 16'd10, 16'd3, 16'hf81f);

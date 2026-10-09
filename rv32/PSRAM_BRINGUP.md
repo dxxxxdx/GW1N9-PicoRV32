@@ -147,7 +147,8 @@ With the Tang Nano 800x525 raster this is about 60.3 Hz and about 37.0 MB/s of
 active RGB565 reads.  Each front die has a raw 160 MB/s data rate at 80 MHz DDR.
 
 The rectangle GPU clips commands to 640x480, computes the 1280-byte row stride
-with shifts/adds, and splits each row into at most 64-pixel writes. A solid
-fill streams one color directly and needs no BSRAM. GPU priority over CPU is
+with shifts/adds, and splits each row into at most 64-pixel writes without
+crossing a 128-byte physical wrap boundary. A solid fill streams one color
+directly and needs no BSRAM. GPU priority over CPU is
 enforced at each switcher command boundary; software waits for GPU idle before
 direct CPU framebuffer access.
