@@ -284,9 +284,15 @@ module psramPhy #(
         end
     end
 
-    // IOB DDR primitives. CK uses the independently phase-adjusted clk_p;
-    // all other outputs and all inputs use the fabric PHY clock.
+    // 以下 ODDR/IDDR 是高云 I/O DDR 原语，应被布局到引脚附近的 IOB 中：
+    // D0/Q0 对应上升沿，D1/Q1 对应下降沿，一拍传两个 8 位数据并拼成 16 位字。
+    // 移植时换成目标厂商的 ODDR/IDDR 或 OSERDES/ISERDES，并保持两条边的
+    // 位序不变。PSRAM CK 独用相移 clk_p，其余收发均使用 PHY 时钟 clk。
+    //
+    // Gowin ODDR 的 TX/Q1 在这里还承担 DDR 化的三态控制；其他厂商通常要
+    // 接专用 OBUFT/IOBUF 的 T 引脚，必须让输出使能也走等价的 IOB 时序路径。
     wire csTbuf;
+    // CS# 不需要 DDR 数据变化，但借 ODDR 把它固定收进 IOB，缩短输出路径。
     ODDR oddrCs (
         .CLK(clk), .D0(ramCsN), .D1(ramCsN), .TX(1'b0), .Q0(csTbuf)
     );
@@ -300,6 +306,7 @@ module psramPhy #(
     assign IO_psram_rwds = rwdsOenTbuf ? 1'bz : rwdsTbuf;
 
     wire ckTbuf;
+    // D0=1、D1=0 时由 ODDR 直接生成 PSRAM 所需的连续翻转时钟波形。
     ODDR oddrCk (
         .CLK(clk_p), .D0(ckEnableP), .D1(1'b0), .TX(1'b0), .Q0(ckTbuf)
     );
@@ -313,6 +320,7 @@ module psramPhy #(
     generate
         for (i = 0; i < 8; i = i + 1) begin : g_dq
             wire dqTbuf, dqOenTbuf;
+            // 每个 DQ 位各占一组输出/输入 DDR 单元；Q1 同时带出三态控制。
             ODDR oddrDq (
                 .CLK(clk), .D0(dqOutRis[i]), .D1(dqOutFal[i]),
                 .TX(dqOen), .Q0(dqTbuf), .Q1(dqOenTbuf)

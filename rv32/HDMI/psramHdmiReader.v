@@ -171,7 +171,10 @@ module psramHdmiAsyncFifo #(
     // SDPB 读口有一拍延迟，地址提前指向“本拍取走后的下一项”以持续预取。
     wire [ABITS-1:0] ramReadPtr = readPtrNext;
 
-    // 显式实例化一块 SDPB BSRAM，配置成 512 x 16，避免综合成 LUT/FF RAM。
+    // 高云专用 SDPB 原语：显式占用一块 BSRAM，配置成 512 x 16，避免综合
+    // 成 LUT/FF RAM。移植时换成目标器件的双时钟块 RAM 或异步 FIFO 原语，
+    // 并保持写/读时钟分离、16 位数据宽度和同步读出一拍延迟；外面的 Gray
+    // 指针与跨时钟同步逻辑本身不依赖高云器件，可以继续沿用。
     // 16 位模式下 ADA[1:0] 是两个字节写使能，ADA/ADB[13:4] 是字地址。
     wire [31:0] ramReadData;
     wire [13:0] ramWriteAddress =

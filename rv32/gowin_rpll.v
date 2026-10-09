@@ -39,6 +39,12 @@ wire gw_gnd;
 
 assign gw_vcc = 1'b1;
 assign gw_gnd = 1'b0;
+
+// 高云专用原语 rPLL：一次产生 PSRAM PHY、PSRAM CK 和 CPU 三路时钟。
+// 移植到其他 FPGA 时应换成目标器件的 PLL/MMCM，并保持以下接口语义：
+//   CLKOUT=80MHz，CLKOUTP=80MHz 且相对 CLKOUT 移相 112.5 度，
+//   CLKOUTD=40MHz，LOCK 供顶层复位时序使用。
+// 下方 defparam 名称和值的编码均属于 Gowin，不能直接照搬给其他厂商。
 rPLL rpll_inst (
     .CLKOUT     (clkout),
     .LOCK       (lock),

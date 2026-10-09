@@ -26,6 +26,8 @@ module uartProgramMemory #(
 );
     // GowinSynthesis SUG550 的 RAM 映射属性：请求使用器件 BSRAM。
     // 存储数组不能整体复位，否则综合器通常无法把它推导成块 RAM。
+    // syn_ramstyle 是高云专用提示；移植时换成目标工具的属性或 RAM 推导
+    // 模板，并复查 UART 字节写与 CPU 同步字读取是否仍落在同一块 RAM 中。
     reg [31:0] memory [0:WORDS-1]
         /* synthesis syn_ramstyle = "block_ram" */;
 

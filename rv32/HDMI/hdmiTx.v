@@ -36,6 +36,8 @@ module hdmiTx #(
     reg [2:0] serializerRunPipe = 3'b000;
     // 为三个 OSER10 各复制一级复位寄存器，让布局器能把复位源放到串化器附近；
     // 否则单个高扇出复位 FF 的布线延迟会接近半个串行时钟周期。
+    // syn_preserve/syn_keep 是 GowinSynthesis 属性；移植时换成目标工具的
+    // keep/dont_touch 等价属性，并重新检查三条复位路径的布局和恢复时间。
     (* syn_preserve = 1, syn_keep = 1 *) reg serializerRunBlue = 1'b0;
     (* syn_preserve = 1, syn_keep = 1 *) reg serializerRunGreen = 1'b0;
     (* syn_preserve = 1, syn_keep = 1 *) reg serializerRunRed = 1'b0;
@@ -53,9 +55,11 @@ module hdmiTx #(
         serializerRunRed <= serializerRunPipe[2];
     end
 
-    // fabric 到 OSER 的复位路径接近半个串行周期。显式经过一级 LUT，让复位释放
-    // 落在下降沿之后，从而给下一个边沿留下接近完整的半周期；SDC 只排除这三条
-    // 有意设计的跨边沿复位路径。
+    // fabric 到 OSER 的复位路径接近半个串行周期。显式经过高云 LUT1 原语，
+    // INIT=2'h1 同时完成反相和一级物理延迟，让复位释放落在下降沿之后，从而
+    // 给下一个边沿留下接近完整的半周期；SDC 只排除这三条有意设计的路径。
+    // 这不是普通组合逻辑的写法：移植时应按新器件重新量时序，再用其 LUT 原语
+    // 或寄存器复位流水线实现，不能假设另一家器件的 LUT 延迟仍然合适。
     wire serializerResetBlue;
     wire serializerResetGreen;
     wire serializerResetRed;
@@ -115,6 +119,9 @@ module hdmiTx #(
     );
 
     wire [2:0] serialData;
+    // 高云专用 OSER10：每个像素时钟装入一个 10 位 TMDS 字，随后在 5 倍
+    // 串行时钟的双边沿上按 D0..D9 顺序发出。移植时换成目标厂商的 10:1
+    // OSERDES（必要时级联），保持 5:1 时钟关系、位序和高有效 RESET 不变。
     OSER10 serBlue (
         .Q(serialData[0]), .D0(tmdsBlue[0]), .D1(tmdsBlue[1]),
         .D2(tmdsBlue[2]), .D3(tmdsBlue[3]), .D4(tmdsBlue[4]),
@@ -137,6 +144,15 @@ module hdmiTx #(
         .FCLK(serial_clk), .RESET(serializerResetRed)
     );
 
+    // 高云 ELVDS_OBUF 在这里用作“仿真差分”输出：它把 I 和反相信号分别放到
+    // 同一差分引脚对的 O/OB。CST 实际选择 LVCMOS33D、3.3V、8mA，布局布线
+    // 报告中的 Open Drain 为 OFF，因此这是互补 CMOS 推挽，不是真正的 TMDS
+    // 电流模驱动，也不是开漏输出。
+    //
+    // 本板每根 P/N 线在 FPGA 后串 100nF，HDMI 插座侧再各用 50ohm 上拉到
+    // 3.3V；电容隔直、外部偏置和接收端终端共同把 CMOS 波形变成兼容的
+    // 伪 TMDS 波形。移植时必须把原语、I/O 标准和这套板级网络作为整体处理；
+    // 若改用原生 TMDS/LVDS 驱动，不能原样保留这些电容和上拉电阻。
     ELVDS_OBUF outClock (
         .I(pixel_clk), .O(tmds_clk_p), .OB(tmds_clk_n)
     );

@@ -18,6 +18,8 @@ module rv32RegisterRam #(
 );
     // 请求 GowinSynthesis 使用 BSRAM。不要给整个数组添加复位或初始化
     // 循环，否则可能退化成大量逻辑寄存器；软件不能假设上电内容为零。
+    // syn_ramstyle 是高云综合属性；移植时换成目标工具的 RAM style 属性或
+    // 官方推导模板，并确认同步读和逐字节写使能仍能映射到块 RAM。
     reg [31:0] memory [0:WORDS-1]
         /* synthesis syn_ramstyle = "block_ram" */;
 

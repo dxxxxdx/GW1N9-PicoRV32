@@ -36,6 +36,10 @@ module Gowin_HDMI_rPLL (
     wire clkoutd3Unused;
     wire gwGnd = 1'b0;
 
+    // 高云专用原语 rPLL：把系统 40MHz 提升为 TMDS 串行器使用的
+    // 126.6667MHz。移植时换成目标器件的 PLL/MMCM；必须保留 lock，
+    // 并让它参与下级像素时钟和发送器的复位释放。
+    // 下方 defparam 是 Gowin 的参数编码，其他厂商需要重新计算。
     rPLL rpll_inst (
         .CLKOUT(clkout), .LOCK(lock), .CLKOUTP(clkoutpUnused),
         .CLKOUTD(clkoutdUnused), .CLKOUTD3(clkoutd3Unused),
@@ -74,6 +78,9 @@ module Gowin_HDMI_CLKDIV (
     input  wire hclkin,
     input  wire resetn
 );
+    // 高云专用全局时钟分频原语：126.6667MHz / 5 = 25.3333MHz。
+    // 它与上面的串行时钟保持固定 5:1 关系。移植时优先使用目标器件的
+    // 专用全局时钟分频器或 PLL 第二路输出，不要用普通逻辑计数器造时钟。
     CLKDIV clkdiv_inst (
         .CLKOUT(clkout), .HCLKIN(hclkin), .RESETN(resetn), .CALIB(1'b0)
     );

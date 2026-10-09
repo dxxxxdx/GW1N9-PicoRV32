@@ -21,6 +21,10 @@ IO_LOC "reset_n" 10;
 IO_PORT "reset_n" IO_TYPE=LVCMOS18 PULL_MODE=UP BANK_VCCIO=1.8;
 IO_LOC "clock50MHz" 63;
 IO_PORT "clock50MHz" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+// HDMI 不是原生 TMDS 电气输出：ELVDS_OBUF 仅产生互补逻辑，下面约束成
+// 3.3V LVCMOS 推挽差分对（Open Drain 保持 OFF）。PCB 上每根线串 100nF，
+// 插座侧各有 50ohm 上拉到 3.3V，由交流耦合和外部终端形成伪 TMDS 波形。
+// 换 FPGA 或改原生差分驱动时，必须同时重算/修改这套板级网络。
 IO_LOC "tmds_clk_p" 69,68;
 IO_PORT "tmds_clk_p" IO_TYPE=LVCMOS33D PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
 IO_LOC "tmds_d_p[0]" 71,70;
