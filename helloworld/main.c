@@ -4,11 +4,16 @@
 #include "UART.h"
 #include "IRQ.h"
 
-#define SWAP_TIMEOUT         1000000u
-#define CURSOR_WIDTH            8u
-#define CURSOR_HEIGHT           8u
-#define CURSOR_WORDS_PER_ROW   (CURSOR_WIDTH / 2u)
-#define CURSOR_DELAY_LOOPS     200000u
+#define SWAP_TIMEOUT       1000000u
+#define PANEL_X                 80u
+#define PANEL_Y                 40u
+#define PANEL_WIDTH            480u
+#define PANEL_HEIGHT           400u
+#define SQUARE_SIZE             24u
+#define ORBIT_PHASES            64u
+#define COLOR_BACKGROUND    0x0841u
+#define COLOR_PANEL         0x8410u
+#define COLOR_SQUARE        0x07e0u
 
 _Static_assert(HDMI_FRAME_BYTES <= HDMI_PSRAM_SIZE,
                "RGB565 framebuffer exceeds one physical PSRAM die");
@@ -22,11 +27,6 @@ static void print_result(const char *name, uint32_t got, uint32_t want)
     UART_Hex32(want);
     UART_CStr(got == want ? "  OK\r\n" : "  FAIL\r\n");
 }
-
-static const uint16_t hdmiColors[8] = {
-    0xffffu, 0xffe0u, 0x07ffu, 0x07e0u,
-    0xf81fu, 0xf800u, 0x001fu, 0x0000u
-};
 
 static uint32_t test_rectangle_gpu(void)
 {
@@ -81,102 +81,88 @@ static uint32_t test_rectangle_gpu(void)
     return failureMask;
 }
 
-static void draw_hdmi_color_bars(void)
-{
-    // Eight MMIO commands replace 153,600 CPU stores.  Each 80-pixel row is
-    // split automatically at both 64-pixel and physical 128-byte boundaries.
-    for (uint32_t bar = 0u; bar < 8u; ++bar)
-        GPU_FillRectangle(bar * (HDMI_WIDTH / 8u), 0u,
-                          HDMI_WIDTH / 8u, HDMI_HEIGHT, hdmiColors[bar]);
-}
-
-// Bit 0 is the left-most pixel.
-static const uint8_t cursorShape[CURSOR_HEIGHT] = {
-    0x01u,
-    0x03u,
-    0x07u,
-    0x0fu,
-    0x1fu,
-    0x3fu,
-    0x1bu,
-    0x31u
+// First-quadrant samples for a 180 x 140 ellipse, in 5.625-degree steps.
+// Symmetry expands these 17 pairs into a complete 64-frame orbit without
+// pulling a software floating-point or trigonometry library into the firmware.
+static const int16_t orbitRxCos[17] = {
+    180, 179, 177, 172, 166, 159, 150, 139, 127,
+    114, 100, 85, 69, 52, 35, 18, 0
 };
-static uint32_t cursorOldX[2];
-static uint32_t cursorOldY[2];
-static uint32_t cursorValid[2];
+static const int16_t orbitRySin[17] = {
+    0, 14, 27, 41, 54, 66, 78, 89, 99,
+    108, 116, 123, 129, 134, 137, 139, 140
+};
 
-static void restore_cursor_background(uint32_t x, uint32_t y)
+static uint32_t squareOldX[2];
+static uint32_t squareOldY[2];
+static uint32_t squareValid[2];
+
+static void orbit_position(uint32_t phase, uint32_t *x, uint32_t *y)
 {
-    uint32_t xWord = x / 2u;
+    uint32_t quadrant = (phase >> 4) & 3u;
+    uint32_t step = phase & 15u;
+    int32_t dx;
+    int32_t dy;
 
-    // The demo background is deterministic.  Reconstructing it is safer than
-    // relying on an XOR toggle to have run exactly once on each physical die.
-    for (uint32_t line = 0u; line < CURSOR_HEIGHT; ++line) {
-        uint32_t row = (y + line) * (HDMI_WIDTH / 2u) + xWord;
-        for (uint32_t word = 0u; word < CURSOR_WORDS_PER_ROW; ++word) {
-            uint32_t pixel0 = x + word * 2u;
-            uint32_t pixel1 = pixel0 + 1u;
-            uint32_t packed = (uint32_t)hdmiColors[pixel0 / (HDMI_WIDTH / 8u)] |
-                              ((uint32_t)hdmiColors[pixel1 / (HDMI_WIDTH / 8u)] << 16);
-            HDMI_PSRAM_U32[row + word] = packed;
-        }
+    if (quadrant == 0u) {
+        dx = orbitRxCos[step];
+        dy = orbitRySin[step];
+    } else if (quadrant == 1u) {
+        dx = -orbitRxCos[16u - step];
+        dy = orbitRySin[16u - step];
+    } else if (quadrant == 2u) {
+        dx = -orbitRxCos[step];
+        dy = -orbitRySin[step];
+    } else {
+        dx = orbitRxCos[16u - step];
+        dy = -orbitRySin[16u - step];
     }
+
+    *x = (uint32_t)((int32_t)(HDMI_WIDTH / 2u) + dx -
+                    (int32_t)(SQUARE_SIZE / 2u));
+    *y = (uint32_t)((int32_t)(HDMI_HEIGHT / 2u) + dy -
+                    (int32_t)(SQUARE_SIZE / 2u));
 }
 
-static void xor_cursor(uint32_t x, uint32_t y)
+static void draw_gpu_scene(uint32_t die)
 {
-    uint32_t xWord = x / 2u;
+    uint32_t x;
+    uint32_t y;
 
-    for (uint32_t line = 0u; line < CURSOR_HEIGHT; ++line) {
-        uint32_t row = (y + line) * (HDMI_WIDTH / 2u) + xWord;
-        for (uint32_t word = 0u; word < CURSOR_WORDS_PER_ROW; ++word) {
-            uint32_t pair = (cursorShape[line] >> (word * 2u)) & 3u;
-            uint32_t mask = (pair & 1u ? 0x0000ffffu : 0u) |
-                            (pair & 2u ? 0xffff0000u : 0u);
-            if (mask != 0u) {
-                // One aligned lw returns {pixel[x+1], pixel[x]}; the mask
-                // changes only arrow pixels before the full word is sw'd back.
-                uint32_t pixels = HDMI_PSRAM_U32[row + word];
-                HDMI_PSRAM_U32[row + word] = pixels ^ mask;
-            }
-        }
-    }
+    GPU_FillRectangle(0u, 0u, HDMI_WIDTH, HDMI_HEIGHT, COLOR_BACKGROUND);
+    GPU_FillRectangle(PANEL_X, PANEL_Y, PANEL_WIDTH, PANEL_HEIGHT, COLOR_PANEL);
+    orbit_position(0u, &x, &y);
+    GPU_FillRectangle(x, y, SQUARE_SIZE, SQUARE_SIZE, COLOR_SQUARE);
+    squareOldX[die] = x;
+    squareOldY[die] = y;
+    squareValid[die] = 1u;
 }
 
-static void cursor_delay(void)
+static void animate_gpu_square(void)
 {
-    // Deliberately simple bring-up delay; volatile prevents optimization.
-    for (volatile uint32_t i = 0u; i < CURSOR_DELAY_LOOPS; ++i)
-        __asm__ volatile ("nop");
-}
+    uint32_t phase = 1u;
 
-static void animate_cursor(void)
-{
-    uint32_t x = 0u;
-    uint32_t y = (HDMI_HEIGHT - CURSOR_HEIGHT) / 2u;
-    int32_t dx = 2;
-
-    UART_CStr("moving 8x8 arrow cursor: masked lw/sw on back buffer\r\n");
+    UART_CStr("GPU animation: green square orbiting on gray panel\r\n");
     for (;;) {
         uint32_t die = SwapController_GetBackDie();
-        if (cursorValid[die])
-            restore_cursor_background(cursorOldX[die], cursorOldY[die]);
-        xor_cursor(x, y);
-        cursorOldX[die] = x;
-        cursorOldY[die] = y;
-        cursorValid[die] = 1u;
+        uint32_t x;
+        uint32_t y;
+
+        if (squareValid[die])
+            GPU_FillRectangle(squareOldX[die], squareOldY[die],
+                              SQUARE_SIZE, SQUARE_SIZE, COLOR_PANEL);
+
+        orbit_position(phase, &x, &y);
+        GPU_FillRectangle(x, y, SQUARE_SIZE, SQUARE_SIZE, COLOR_SQUARE);
+        squareOldX[die] = x;
+        squareOldY[die] = y;
+        squareValid[die] = 1u;
 
         if (!SwapController_SwapAtHDMIFrame(SWAP_TIMEOUT)) {
-            UART_CStr("cursor swap timeout\r\n");
+            UART_CStr("GPU animation swap timeout\r\n");
             return;
         }
-
-        if (dx > 0 && x + CURSOR_WIDTH + (uint32_t)dx > HDMI_WIDTH)
-            dx = -dx;
-        else if (dx < 0 && x < (uint32_t)(-dx))
-            dx = -dx;
-        x = (uint32_t)((int32_t)x + dx);
-        cursor_delay();
+        phase = (phase + 1u) & (ORBIT_PHASES - 1u);
     }
 }
 
@@ -222,16 +208,16 @@ int main(void)
     }
     UART_CStr("rectangle GPU readback test on die0...\r\n");
     print_result("GPU rectangle failure mask", test_rectangle_gpu(), 0u);
-    draw_hdmi_color_bars();
+    draw_gpu_scene(0u);
     if (!SwapController_SelectBackBeforeHDMI(1u, SWAP_TIMEOUT)) {
         UART_CStr("HDMI init failed: cannot select die1\r\n");
         for (;;) {}
     }
-    draw_hdmi_color_bars();
+    draw_gpu_scene(1u);
     if (SwapController_GetBackDie() == 1u) {
         HDMI_PSRAM_Enable();
-        UART_CStr("HDMI enabled; GPU color bars initialized on both dies\r\n");
-        animate_cursor();
+        UART_CStr("HDMI enabled; GPU scene initialized on both dies\r\n");
+        animate_gpu_square();
     } else {
         UART_CStr("HDMI enable failed: framebuffer select timeout\r\n");
     }
