@@ -1,4 +1,4 @@
-#include "hdmi_psram.h"
+#include "HDMI_PSRAM.h"
 
 int HDMI_PSRAM_Ready(void)
 {

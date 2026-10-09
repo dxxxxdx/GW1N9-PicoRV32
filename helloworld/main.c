@@ -1,4 +1,4 @@
-#include "hdmi_psram.h"
+#include "HDMI_PSRAM.h"
 #include "SwapController.h"
 #include "GPU.h"
 #include "UART.h"
@@ -27,6 +27,53 @@ static const uint16_t hdmiColors[8] = {
     0xffffu, 0xffe0u, 0x07ffu, 0x07e0u,
     0xf81fu, 0xf800u, 0x001fu, 0x0000u
 };
+
+static uint32_t test_rectangle_gpu(void)
+{
+    volatile uint16_t *frame = HDMI_PSRAM_U16;
+    const uint32_t framePixels = HDMI_WIDTH * HDMI_HEIGHT;
+    const uint32_t firstRow = 3u * HDMI_WIDTH;
+    const uint32_t lastRow = (HDMI_HEIGHT - 1u) * HDMI_WIDTH;
+    const uint16_t burstColor = 0xf81fu;
+    const uint16_t clippedColor = 0x07e0u;
+    const uint16_t guard = 0x1234u;
+    uint32_t completedBefore = GPU_GetCompletionCount();
+    uint32_t failures = 0u;
+
+    // 130 pixels crosses two 64-pixel/128-byte burst boundaries.
+    frame[firstRow + 9u] = guard;
+    frame[firstRow + 140u] = guard;
+    GPU_FillRectangle(10u, 3u, 130u, 2u, burstColor);
+    if (frame[firstRow + 10u] != burstColor ||
+        frame[firstRow + 73u] != burstColor ||
+        frame[firstRow + 74u] != burstColor ||
+        frame[firstRow + 139u] != burstColor ||
+        frame[firstRow + HDMI_WIDTH + 10u] != burstColor ||
+        frame[firstRow + HDMI_WIDTH + 139u] != burstColor ||
+        frame[firstRow + 9u] != guard ||
+        frame[firstRow + 140u] != guard)
+        ++failures;
+
+    // Only x=638..639 on the final row may survive this clipping operation.
+    frame[lastRow + 637u] = guard;
+    frame[framePixels + 638u] = guard;
+    GPU_FillRectangle(638u, 479u, 10u, 3u, clippedColor);
+    if (frame[lastRow + 637u] != guard ||
+        frame[lastRow + 638u] != clippedColor ||
+        frame[lastRow + 639u] != clippedColor ||
+        frame[framePixels + 638u] != guard)
+        ++failures;
+
+    // Empty commands must complete without issuing a PSRAM write.
+    frame[0] = guard;
+    GPU_FillRectangle(0u, 0u, 0u, 10u, 0xffffu);
+    if (frame[0] != guard)
+        ++failures;
+
+    if (((GPU_GetCompletionCount() - completedBefore) & 0xffffu) != 3u)
+        ++failures;
+    return failures;
+}
 
 static void draw_hdmi_color_bars(void)
 {
@@ -167,6 +214,8 @@ int main(void)
         UART_CStr("HDMI init failed: cannot select die0\r\n");
         for (;;) {}
     }
+    UART_CStr("rectangle GPU readback test on die0...\r\n");
+    print_result("GPU rectangle test failures", test_rectangle_gpu(), 0u);
     draw_hdmi_color_bars();
     if (!SwapController_SelectBackBeforeHDMI(1u, SWAP_TIMEOUT)) {
         UART_CStr("HDMI init failed: cannot select die1\r\n");

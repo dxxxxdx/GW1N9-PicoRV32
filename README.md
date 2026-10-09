@@ -199,7 +199,7 @@ GPU 页面从 `0x0300_f000` 开始：
 硬件会把矩形裁剪到 framebuffer，按 1280 字节 stride 逐行寻址，再把每行
 拆成最多 64 个 RGB565 像素的长事务。纯色数据直接流向 PHY，因此这一版
 不消耗额外 BSRAM。软件封装分别位于 `GPU.c`、`SwapController.c` 和
-`hdmi_psram.c`。
+`HDMI_PSRAM.c`。
 
 ## UART TX MMIO
 
