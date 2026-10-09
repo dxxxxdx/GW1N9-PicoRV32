@@ -181,6 +181,10 @@ underflow 调试标志。FIFO 的可读/可写数量按“本拍更新后的本�
 再用 `sw` 写回。旧位置直接按已知色条重新生成 8x8 背景，避免双缓冲中累积
 异或残影，然后在 back die 重画新位置；正常 HDMI 帧边界 swap 后才显示。
 
+启动时的 GPU readback 自测只用对齐 `lw/sw` 读取两个一组的 RGB565 像素。
+失败结果是位掩码：bit 0 为跨 128-byte burst 的矩形，bit 1 为右下角裁剪，
+bit 2 为零宽命令，bit 3 为完成计数。
+
 RGB565 的有效像素流量约为 `640 * 480 * 2 * 60.3 = 37.0 MB/s`。单个 x8
 PSRAM die 在 80 MHz DDR 下的原始数据率为 160 MB/s；HDMI 独占 front die，
 不会与 CPU/GPU 的 back die 流量仲裁。

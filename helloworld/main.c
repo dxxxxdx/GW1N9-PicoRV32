@@ -30,49 +30,54 @@ static const uint16_t hdmiColors[8] = {
 
 static uint32_t test_rectangle_gpu(void)
 {
-    volatile uint16_t *frame = HDMI_PSRAM_U16;
+    volatile uint32_t *frame = HDMI_PSRAM_U32;
     const uint32_t framePixels = HDMI_WIDTH * HDMI_HEIGHT;
     const uint32_t firstRow = 3u * HDMI_WIDTH;
     const uint32_t lastRow = (HDMI_HEIGHT - 1u) * HDMI_WIDTH;
     const uint16_t burstColor = 0xf81fu;
     const uint16_t clippedColor = 0x07e0u;
-    const uint16_t guard = 0x1234u;
+    const uint32_t burstPair = (uint32_t)burstColor |
+                               ((uint32_t)burstColor << 16);
+    const uint32_t clippedPair = (uint32_t)clippedColor |
+                                 ((uint32_t)clippedColor << 16);
+    const uint32_t guardPair = 0x12341234u;
     uint32_t completedBefore = GPU_GetCompletionCount();
-    uint32_t failures = 0u;
+    uint32_t failureMask = 0u;
 
+    // CPU-side PSRAM accesses deliberately use only aligned lw/sw.  The GPU
+    // still works in RGB565 pixels; each CPU word below observes two pixels.
     // 130 pixels crosses two 64-pixel/128-byte burst boundaries.
-    frame[firstRow + 9u] = guard;
-    frame[firstRow + 140u] = guard;
+    frame[(firstRow + 8u) / 2u] = guardPair;
+    frame[(firstRow + 140u) / 2u] = guardPair;
     GPU_FillRectangle(10u, 3u, 130u, 2u, burstColor);
-    if (frame[firstRow + 10u] != burstColor ||
-        frame[firstRow + 73u] != burstColor ||
-        frame[firstRow + 74u] != burstColor ||
-        frame[firstRow + 139u] != burstColor ||
-        frame[firstRow + HDMI_WIDTH + 10u] != burstColor ||
-        frame[firstRow + HDMI_WIDTH + 139u] != burstColor ||
-        frame[firstRow + 9u] != guard ||
-        frame[firstRow + 140u] != guard)
-        ++failures;
+    if (frame[(firstRow + 10u) / 2u] != burstPair ||
+        frame[(firstRow + 72u) / 2u] != burstPair ||
+        frame[(firstRow + 74u) / 2u] != burstPair ||
+        frame[(firstRow + 138u) / 2u] != burstPair ||
+        frame[(firstRow + HDMI_WIDTH + 10u) / 2u] != burstPair ||
+        frame[(firstRow + HDMI_WIDTH + 138u) / 2u] != burstPair ||
+        frame[(firstRow + 8u) / 2u] != guardPair ||
+        frame[(firstRow + 140u) / 2u] != guardPair)
+        failureMask |= 1u << 0;
 
     // Only x=638..639 on the final row may survive this clipping operation.
-    frame[lastRow + 637u] = guard;
-    frame[framePixels + 638u] = guard;
+    frame[(lastRow + 636u) / 2u] = guardPair;
+    frame[(framePixels + 638u) / 2u] = guardPair;
     GPU_FillRectangle(638u, 479u, 10u, 3u, clippedColor);
-    if (frame[lastRow + 637u] != guard ||
-        frame[lastRow + 638u] != clippedColor ||
-        frame[lastRow + 639u] != clippedColor ||
-        frame[framePixels + 638u] != guard)
-        ++failures;
+    if (frame[(lastRow + 636u) / 2u] != guardPair ||
+        frame[(lastRow + 638u) / 2u] != clippedPair ||
+        frame[(framePixels + 638u) / 2u] != guardPair)
+        failureMask |= 1u << 1;
 
     // Empty commands must complete without issuing a PSRAM write.
-    frame[0] = guard;
+    frame[0] = guardPair;
     GPU_FillRectangle(0u, 0u, 0u, 10u, 0xffffu);
-    if (frame[0] != guard)
-        ++failures;
+    if (frame[0] != guardPair)
+        failureMask |= 1u << 2;
 
     if (((GPU_GetCompletionCount() - completedBefore) & 0xffffu) != 3u)
-        ++failures;
-    return failures;
+        failureMask |= 1u << 3;
+    return failureMask;
 }
 
 static void draw_hdmi_color_bars(void)
@@ -215,7 +220,7 @@ int main(void)
         for (;;) {}
     }
     UART_CStr("rectangle GPU readback test on die0...\r\n");
-    print_result("GPU rectangle test failures", test_rectangle_gpu(), 0u);
+    print_result("GPU rectangle failure mask", test_rectangle_gpu(), 0u);
     draw_hdmi_color_bars();
     if (!SwapController_SelectBackBeforeHDMI(1u, SWAP_TIMEOUT)) {
         UART_CStr("HDMI init failed: cannot select die1\r\n");
