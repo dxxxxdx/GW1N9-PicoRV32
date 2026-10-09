@@ -66,8 +66,10 @@ FIFO.
 
 The CPU writes `SWAP_REQUEST`.  The request remains pending and
 `frame_swap_request` remains high until HDMI reports `hdmi_frame_done`.
-The switcher then blocks new commands, drains accepted physical and logical
-transactions, and atomically flips front/back.
+The switcher then blocks new CPU and HDMI commands. If a rectangle-GPU job is
+still busy, all later bursts belonging to that same job remain enabled and
+continue targeting the old back die. The switcher atomically flips front/back
+only after the whole GPU job is complete and both physical dies are ready.
 
 While HDMI is disabled, MMIO bit 1 injects a software frame-done event so both
 physical dies can be tested through the one logical window.  Once HDMI is
@@ -115,7 +117,8 @@ bits 31:16 = completed swap count
 
 The rectangle GPU is in the last 4 KiB page, `0x0300_f000`. Its registers
 are X, Y, width, height, RGB565 color and START; status bit 0 remains high from
-START until every PSRAM write burst has completed.
+START until every PSRAM write burst has completed. Writes to parameters and
+START while busy are acknowledged and discarded rather than queued.
 
 ## Firmware startup
 

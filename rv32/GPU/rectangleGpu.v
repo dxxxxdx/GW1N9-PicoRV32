@@ -20,6 +20,7 @@ module rectangleGpu #(
     input  wire [ 3:0] mmio_wstrb,
     output reg  [31:0] mmio_rdata,
 
+    output reg         gpu_job_busy,
     output reg         gpu_cmd_valid,
     input  wire        gpu_cmd_ready,
     output wire        gpu_cmd_wr,
@@ -84,7 +85,10 @@ module rectangleGpu #(
                 completionCount <= completionCount + 16'd1;
             end
 
-            if (mmio_valid && !mmio_ready && |mmio_wstrb) begin
+            // Busy commands are deliberately non-queued: acknowledge the
+            // MMIO access, but discard every parameter/START write.  Software
+            // must observe idle before programming the next complete command.
+            if (mmio_valid && !mmio_ready && |mmio_wstrb && !cpuBusy) begin
                 case (mmio_addr[5:2])
                     4'd2: if (mmio_wstrb[0] || mmio_wstrb[1])
                               xReg <= mmio_wdata[15:0];
@@ -96,7 +100,7 @@ module rectangleGpu #(
                               heightReg <= mmio_wdata[15:0];
                     4'd6: if (mmio_wstrb[0] || mmio_wstrb[1])
                               colorReg <= mmio_wdata[15:0];
-                    4'd7: if (mmio_wstrb[0] && mmio_wdata[0] && !cpuBusy) begin
+                    4'd7: if (mmio_wstrb[0] && mmio_wdata[0]) begin
                         jobX <= xReg;
                         jobY <= yReg;
                         jobWidth <= widthReg;
@@ -190,6 +194,7 @@ module rectangleGpu #(
             jobColorSyncPhy <= 16'd0;
             doneTogglePhy  <= 1'b0;
             gpuState       <= G_IDLE;
+            gpu_job_busy   <= 1'b0;
             gpu_cmd_valid  <= 1'b0;
             gpu_cmd_addr   <= 22'd0;
             gpu_cmd_words  <= 7'd1;
@@ -220,6 +225,7 @@ module rectangleGpu #(
                         widthPhy <= jobWidthSyncPhy;
                         heightPhy <= jobHeightSyncPhy;
                         colorPhy <= jobColorSyncPhy;
+                        gpu_job_busy <= 1'b1;
                         gpuState <= G_CAPTURE;
                     end
                 end
@@ -249,6 +255,7 @@ module rectangleGpu #(
                 G_VALIDATE: begin
                     if (rowWords == 10'd0 || rowsLeft == 9'd0) begin
                         doneTogglePhy <= ~doneTogglePhy;
+                        gpu_job_busy <= 1'b0;
                         gpuState <= G_IDLE;
                     end else begin
                         wordsLeft <= rowWords;
@@ -287,12 +294,16 @@ module rectangleGpu #(
                             gpuState <= G_PREP;
                         end else begin
                             doneTogglePhy <= ~doneTogglePhy;
+                            gpu_job_busy <= 1'b0;
                             gpuState <= G_IDLE;
                         end
                     end
                 end
 
-                default: gpuState <= G_IDLE;
+                default: begin
+                    gpu_job_busy <= 1'b0;
+                    gpuState <= G_IDLE;
+                end
             endcase
         end
     end

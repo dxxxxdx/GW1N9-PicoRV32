@@ -39,6 +39,7 @@ module psramSwitcher (
     input  wire [ 6:0] gpu_cmd_words,
     input  wire [15:0] gpu_w_data,
     input  wire [ 1:0] gpu_w_mask,
+    input  wire        gpu_job_busy,
     output wire        gpu_w_take,
     output wire [15:0] gpu_r_data,
     output wire        gpu_r_valid,
@@ -107,6 +108,11 @@ module psramSwitcher (
 
     reg       active0;
     reg       active1;
+    // Logical-client busy flags duplicate the ownership lifetime without the
+    // physical-die mux.  They keep client ready paths short enough for 80 MHz;
+    // active0/1 remain the authority for response routing and swap drain.
+    reg       frontBusy;
+    reg       backBusy;
     reg [1:0] owner0;
     reg [1:0] owner1;
     reg       swapBarrier;
@@ -115,31 +121,42 @@ module psramSwitcher (
     assign swap_request_hdmi = swap_pending;
 
     wire bothInitialized = phy0_init_done && phy1_init_done;
-    wire die0Free = !active0 && !phy0_busy && phy0_cmd_ready;
-    wire die1Free = !active1 && !phy1_busy && phy1_cmd_ready;
-    wire frontFree = front_die ? die1Free : die0Free;
-    wire backFree  = front_die ? die0Free : die1Free;
+    wire die0PipeFree = !phy0_busy && phy0_cmd_ready;
+    wire die1PipeFree = !phy1_busy && phy1_cmd_ready;
+    wire die0Drained = !active0 && die0PipeFree;
+    wire die1Drained = !active1 && die1PipeFree;
+    wire frontFree = !frontBusy &&
+                     (front_die ? die1PipeFree : die0PipeFree);
+    wire backFree  = !backBusy &&
+                     (front_die ? die0PipeFree : die1PipeFree);
 
     wire frameStartsBarrier = frame_done_pulse &&
                               (swap_pending || swap_request_pulse);
-    // A frame-done edge latches the barrier.  A command accepted on that same
-    // edge is tracked by active0/active1 and drained before the swap, so there
-    // is no need to feed frame_done combinationally into every PHY command.
-    wire acceptEnabled = bothInitialized && !swapBarrier;
+    // A frame-done edge starts draining for a swap. CPU and HDMI stop issuing
+    // new work, while an already-running GPU job may launch all of its later
+    // bursts to the old back die. The mapping changes only after that whole
+    // job and both physical transactions are finished.
+    wire normalAcceptEnabled = bothInitialized && !swapBarrier;
+    wire gpuAcceptEnabled = bothInitialized &&
+                            (!swapBarrier || gpu_job_busy);
 
-    assign hdmi_cmd_ready = acceptEnabled && frontFree;
-    assign gpu_cmd_ready  = acceptEnabled && backFree;
-    assign cpu_cmd_ready  = acceptEnabled && backFree && !gpu_cmd_valid;
+    assign hdmi_cmd_ready = normalAcceptEnabled && frontFree;
+    assign gpu_cmd_ready  = gpuAcceptEnabled && backFree;
+    assign cpu_cmd_ready  = normalAcceptEnabled && backFree && !gpu_cmd_valid;
 
     // Valid must not depend on ready.  Keeping the two sides independent cuts
     // the otherwise long PHY-state -> arbiter -> PHY-state combinational path
     // and follows the normal valid/ready contract: the chosen request remains
     // asserted until the target PHY accepts it.
-    wire backCmdValid = acceptEnabled && (gpu_cmd_valid || cpu_cmd_valid);
-    wire backCmdWr = gpu_cmd_valid ? gpu_cmd_wr : cpu_cmd_wr;
-    wire [21:0] backCmdAddr = gpu_cmd_valid ? gpu_cmd_addr : cpu_cmd_addr;
-    wire [ 6:0] backCmdWords = gpu_cmd_valid ? gpu_cmd_words : cpu_cmd_words;
-    wire frontCmdValid = acceptEnabled && hdmi_cmd_valid;
+    wire gpuBackCmdValid = gpuAcceptEnabled && gpu_cmd_valid;
+    wire cpuBackCmdValid = normalAcceptEnabled && cpu_cmd_valid &&
+                           !gpu_cmd_valid;
+    wire backSelectGpu = gpuBackCmdValid;
+    wire backCmdValid = gpuBackCmdValid || cpuBackCmdValid;
+    wire backCmdWr = backSelectGpu ? gpu_cmd_wr : cpu_cmd_wr;
+    wire [21:0] backCmdAddr = backSelectGpu ? gpu_cmd_addr : cpu_cmd_addr;
+    wire [ 6:0] backCmdWords = backSelectGpu ? gpu_cmd_words : cpu_cmd_words;
+    wire frontCmdValid = normalAcceptEnabled && hdmi_cmd_valid;
 
     // A physical command is a one-cycle valid/ready transfer.  Front and back
     // target opposite dies, so they may both launch in the same cycle.
@@ -154,8 +171,9 @@ module psramSwitcher (
     assign phy1_cmd_words = front_die ? hdmi_cmd_words : backCmdWords;
 
     assign any_busy = active0 || active1 || phy0_busy || phy1_busy ||
-                      swapBarrier;
-    assign gpu_active = (active0 && owner0 == OWNER_GPU) ||
+                      gpu_job_busy || swapBarrier;
+    assign gpu_active = gpu_job_busy ||
+                        (active0 && owner0 == OWNER_GPU) ||
                         (active1 && owner1 == OWNER_GPU);
     assign hdmi_active = (active0 && owner0 == OWNER_HDMI) ||
                          (active1 && owner1 == OWNER_HDMI);
@@ -227,6 +245,8 @@ module psramSwitcher (
             swap_count        <= 16'd0;
             active0           <= 1'b0;
             active1           <= 1'b0;
+            frontBusy         <= 1'b0;
+            backBusy          <= 1'b0;
             owner0            <= OWNER_NONE;
             owner1            <= OWNER_NONE;
         end else begin
@@ -237,14 +257,20 @@ module psramSwitcher (
 
             if (phy0_cmd_valid && phy0_cmd_ready) begin
                 active0 <= 1'b1;
-                owner0 <= front_die ? (gpu_cmd_valid ? OWNER_GPU : OWNER_CPU) :
+                owner0 <= front_die ? (backSelectGpu ? OWNER_GPU : OWNER_CPU) :
                                       OWNER_HDMI;
             end
             if (phy1_cmd_valid && phy1_cmd_ready) begin
                 active1 <= 1'b1;
                 owner1 <= front_die ? OWNER_HDMI :
-                                      (gpu_cmd_valid ? OWNER_GPU : OWNER_CPU);
+                                      (backSelectGpu ? OWNER_GPU : OWNER_CPU);
             end
+
+            if (hdmi_cmd_valid && hdmi_cmd_ready)
+                frontBusy <= 1'b1;
+            if ((gpu_cmd_valid && gpu_cmd_ready) ||
+                (cpu_cmd_valid && cpu_cmd_ready))
+                backBusy <= 1'b1;
 
             if (active0 && phy0_done) begin
                 active0 <= 1'b0;
@@ -256,7 +282,14 @@ module psramSwitcher (
                 owner1 <= OWNER_NONE;
             end
 
-            if (swapBarrier && die0Free && die1Free) begin
+
+            if (hdmi_done)
+                frontBusy <= 1'b0;
+            if (gpu_done || cpu_done)
+                backBusy <= 1'b0;
+
+            if (swapBarrier && !gpu_job_busy && !frontBusy && !backBusy &&
+                die0Drained && die1Drained) begin
                 front_die        <= ~front_die;
                 swap_pending     <= 1'b0;
                 swapBarrier      <= 1'b0;

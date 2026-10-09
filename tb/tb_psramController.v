@@ -123,6 +123,7 @@ module tb_psramController;
     wire [31:0] swapcfg_rdata;
 
     reg gpu_cmd_valid = 1'b0;
+    reg gpu_job_busy = 1'b0;
     wire gpu_cmd_ready;
     reg gpu_cmd_wr = 1'b0;
     reg [21:0] gpu_cmd_addr = 22'd0;
@@ -160,6 +161,7 @@ module tb_psramController;
         .swapcfg_addr(swapcfg_addr), .swapcfg_wdata(swapcfg_wdata),
         .swapcfg_wstrb(swapcfg_wstrb), .swapcfg_rdata(swapcfg_rdata),
         .gpu_cmd_valid(gpu_cmd_valid), .gpu_cmd_ready(gpu_cmd_ready),
+        .gpu_job_busy(gpu_job_busy),
         .gpu_cmd_wr(gpu_cmd_wr), .gpu_cmd_addr(gpu_cmd_addr),
         .gpu_cmd_words(gpu_cmd_words), .gpu_w_data(gpu_w_data),
         .gpu_w_mask(gpu_w_mask), .gpu_w_take(gpu_w_take),

@@ -402,6 +402,7 @@ module rv32top #(
     // ---------------------------------------------------------------------
     // Rectangle GPU shares logical back with the CPU; HDMI owns logical front.
     wire gpuCmdValid;
+    wire gpuJobBusy;
     wire gpuCmdWrite;
     wire [21:0] gpuCmdAddr;
     wire [6:0] gpuCmdWords;
@@ -434,6 +435,7 @@ module rv32top #(
         .mmio_valid(gpucfg_valid), .mmio_ready(gpucfg_ready),
         .mmio_addr(gpucfg_addr[11:0]), .mmio_wdata(gpucfg_wdata),
         .mmio_wstrb(gpucfg_wstrb), .mmio_rdata(gpucfg_rdata),
+        .gpu_job_busy(gpuJobBusy),
         .gpu_cmd_valid(gpuCmdValid), .gpu_cmd_ready(gpuPsramReady),
         .gpu_cmd_wr(gpuCmdWrite), .gpu_cmd_addr(gpuCmdAddr),
         .gpu_cmd_words(gpuCmdWords), .gpu_w_data(gpuWriteData),
@@ -485,6 +487,7 @@ module rv32top #(
         .swapcfg_wstrb(swapcfg_wstrb), .swapcfg_rdata(swapcfg_rdata),
 
         .gpu_cmd_valid(gpuCmdValid), .gpu_cmd_ready(gpuPsramReady),
+        .gpu_job_busy(gpuJobBusy),
         .gpu_cmd_wr(gpuCmdWrite), .gpu_cmd_addr(gpuCmdAddr),
         .gpu_cmd_words(gpuCmdWords),
         .gpu_w_data(gpuWriteData), .gpu_w_mask(gpuWriteMask),

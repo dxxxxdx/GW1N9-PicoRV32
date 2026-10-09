@@ -148,6 +148,11 @@ PSRAM 两个物理 die 各为 4 MiB。HDMI 端独占逻辑前台 die；CPU 与�
 switcher 才原子翻转 front/back 映射。没有 HDMI 时可同时写 bit 1 注入软件
 帧完成脉冲完成启动期换页；软件接口见 `hostutil/include/SwapController.h`。
 
+若帧完成时矩形 GPU 仍在执行一个多突发任务，switcher 会停止接收新的 CPU
+和 HDMI 事务，但允许该 GPU 任务剩余的突发继续写入原 back die。等 GPU 整个
+任务结束且两颗 die 都回到 ready，才执行映射翻转，因此一个矩形不会被拆到
+两颗 die。GPU busy 期间对参数寄存器或 START 的写操作会正常总线应答但被丢弃。
+
 PHY、switcher 与 GPU/HDMI 端口统一使用 1..64 个 16-bit beat 的
 突发接口（最大 128 字节）。CPU 的一次 `lw/sw` 只发送一次 CA，随后用两个
 连续的低 16 位 beat 完成；32 位拆分和拼接留在 CPU bridge 内，软件看到的
@@ -198,7 +203,8 @@ GPU 页面从 `0x0300_f000` 开始：
 
 硬件会把矩形裁剪到 framebuffer，按 1280 字节 stride 逐行寻址，再把每行
 拆成最多 64 个 RGB565 像素的长事务。纯色数据直接流向 PHY，因此这一版
-不消耗额外 BSRAM。软件封装分别位于 `GPU.c`、`SwapController.c` 和
+不消耗额外 BSRAM。bit 0 busy 有效期间，所有写寄存器访问都会被忽略，软件
+必须等 idle 后再完整写入下一组参数。软件封装分别位于 `GPU.c`、`SwapController.c` 和
 `HDMI_PSRAM.c`。
 
 ## UART TX MMIO

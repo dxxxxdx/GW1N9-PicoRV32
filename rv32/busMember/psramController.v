@@ -51,6 +51,7 @@ module psramController #(
     // gpu_w_take; returned read beats cannot be back-pressured.
     input  wire        gpu_cmd_valid,
     output wire        gpu_cmd_ready,
+    input  wire        gpu_job_busy,
     input  wire        gpu_cmd_wr,
     input  wire [21:0] gpu_cmd_addr,
     input  wire [ 6:0] gpu_cmd_words,
@@ -343,7 +344,8 @@ module psramController #(
         .gpu_cmd_valid(gpu_cmd_valid), .gpu_cmd_ready(gpu_cmd_ready),
         .gpu_cmd_wr(gpu_cmd_wr), .gpu_cmd_addr(gpu_cmd_addr),
         .gpu_cmd_words(gpu_cmd_words), .gpu_w_data(gpu_w_data),
-        .gpu_w_mask(gpu_w_mask), .gpu_w_take(gpu_w_take),
+        .gpu_w_mask(gpu_w_mask), .gpu_job_busy(gpu_job_busy),
+        .gpu_w_take(gpu_w_take),
         .gpu_r_data(gpu_r_data), .gpu_r_valid(gpu_r_valid),
         .gpu_r_last(gpu_r_last), .gpu_done(gpu_done),
         .hdmi_cmd_valid(hdmi_cmd_valid), .hdmi_cmd_ready(hdmi_cmd_ready),

@@ -15,6 +15,7 @@ module tb_rectangleGpu;
     wire [31:0] mmio_rdata;
 
     wire cmd_valid;
+    wire job_busy;
     reg cmd_ready = 1'b1;
     wire cmd_wr;
     wire [21:0] cmd_addr;
@@ -35,6 +36,7 @@ module tb_rectangleGpu;
         .mmio_valid(mmio_valid), .mmio_ready(mmio_ready),
         .mmio_addr(mmio_addr), .mmio_wdata(mmio_wdata),
         .mmio_wstrb(mmio_wstrb), .mmio_rdata(mmio_rdata),
+        .gpu_job_busy(job_busy),
         .gpu_cmd_valid(cmd_valid), .gpu_cmd_ready(cmd_ready),
         .gpu_cmd_wr(cmd_wr), .gpu_cmd_addr(cmd_addr),
         .gpu_cmd_words(cmd_words), .gpu_w_data(w_data),
@@ -105,8 +107,20 @@ module tb_rectangleGpu;
         start_rect(16'd10, 16'd3, 16'd130, 16'd2, 16'hf81f);
         if (!dut.cpuBusy)
             $fatal(1, "busy was not visible immediately after START");
+
+        // Busy writes are acknowledged but must not mutate the staged command
+        // or queue a second START.
+        write_reg(12'h008, 16'd222);
+        write_reg(12'h00c, 16'd111);
+        write_reg(12'h018, 16'h07e0);
+        write_reg(12'h01c, 32'd1);
+        if (dut.xReg !== 16'd10 || dut.yReg !== 16'd3 ||
+            dut.colorReg !== 16'hf81f)
+            $fatal(1, "busy MMIO write changed GPU parameters");
         wait (dut.completionCount == 16'd1);
         repeat (2) @(negedge clk);
+        if (dut.completionCount !== 16'd1 || job_busy)
+            $fatal(1, "busy START was queued or job busy did not clear");
         if (commandCount != 6)
             $fatal(1, "130x2 rectangle used %0d commands, expected 6", commandCount);
         if (loggedAddr[0] !== 22'd3860 || loggedWords[0] !== 7'd64 ||
@@ -130,7 +144,7 @@ module tb_rectangleGpu;
         if (commandCount != 7)
             $fatal(1, "zero-width rectangle emitted a command");
 
-        $display("PASS: GPU MMIO, clipping and 64-pixel rectangle bursts");
+        $display("PASS: GPU busy-write rejection, clipping and 64-pixel bursts");
         $finish;
     end
 endmodule

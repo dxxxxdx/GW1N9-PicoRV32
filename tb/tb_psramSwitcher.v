@@ -17,6 +17,7 @@ module tb_psramSwitcher;
     wire cpu_r_valid, cpu_r_last, cpu_done;
 
     reg gpu_cmd_valid = 1'b0;
+    reg gpu_job_busy = 1'b0;
     wire gpu_cmd_ready;
     reg gpu_cmd_wr = 1'b0;
     reg [21:0] gpu_cmd_addr = 22'd0;
@@ -90,7 +91,8 @@ module tb_psramSwitcher;
         .gpu_cmd_valid(gpu_cmd_valid), .gpu_cmd_ready(gpu_cmd_ready),
         .gpu_cmd_wr(gpu_cmd_wr), .gpu_cmd_addr(gpu_cmd_addr),
         .gpu_cmd_words(gpu_cmd_words), .gpu_w_data(gpu_w_data),
-        .gpu_w_mask(gpu_w_mask), .gpu_w_take(gpu_w_take),
+        .gpu_w_mask(gpu_w_mask), .gpu_job_busy(gpu_job_busy),
+        .gpu_w_take(gpu_w_take),
         .gpu_r_data(gpu_r_data), .gpu_r_valid(gpu_r_valid),
         .gpu_r_last(gpu_r_last), .gpu_done(gpu_done),
         .hdmi_cmd_valid(hdmi_cmd_valid), .hdmi_cmd_ready(hdmi_cmd_ready),
@@ -207,6 +209,7 @@ module tb_psramSwitcher;
 
         // A frame boundary arms a barrier but cannot cut an active GPU burst.
         @(negedge clk);
+        gpu_job_busy = 1'b1;
         gpu_cmd_valid = 1'b1;
         gpu_cmd_wr = 1'b1;
         gpu_cmd_addr = 22'h000700;
@@ -227,12 +230,30 @@ module tb_psramSwitcher;
             $fatal(1, "swap barrier cut an active burst or admitted new work");
 
         finish0();
+        repeat (2) @(negedge clk);
+        if (front_die !== 1'b1 || swap_count !== 16'd0 || !swap_pending ||
+            !gpu_cmd_ready || cpu_cmd_ready || hdmi_cmd_ready)
+            $fatal(1, "barrier did not let the active GPU job continue");
+
+        // A later burst belonging to the same job must still target the old
+        // back die.  Mapping remains frozen until gpu_job_busy is released.
+        gpu_cmd_valid = 1'b1;
+        gpu_cmd_addr = 22'h000800;
+        gpu_cmd_words = 7'd16;
+        #1;
+        if (!gpu_cmd_ready || !phy0_cmd_valid || phy1_cmd_valid ||
+            phy0_cmd_addr !== 22'h000800)
+            $fatal(1, "GPU continuation burst changed die during swap drain");
+        @(negedge clk);
+        gpu_cmd_valid = 1'b0;
+        finish0();
+        gpu_job_busy = 1'b0;
         repeat (3) @(negedge clk);
         if (front_die !== 1'b0 || back_die !== 1'b1 ||
             swap_count !== 16'd1 || swap_pending)
-            $fatal(1, "swap did not commit after burst drained");
+            $fatal(1, "swap did not commit after GPU job and dies drained");
 
-        $display("PASS: burst routing, GPU priority, concurrency and atomic swap");
+        $display("PASS: GPU job drain, priority, concurrency and atomic swap");
         $finish;
     end
 endmodule
