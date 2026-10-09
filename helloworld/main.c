@@ -219,6 +219,7 @@ int main(void)
     UART_CStr("done\r\n");
     for (;;) {
     }
+
 }
 
 const uint8_t ch0msg[] = "CH0 triggered!";
