@@ -57,6 +57,8 @@ GW1N-9_rv32/
 │   │   ├── UARTRX.v         # 50 MHz / 115200 / 8-N-1 接收器
 │   │   ├── UARTTX.v         # 50 MHz / 115200 / 8-N-1 发送器
 │   │   └── UARTTX_MMIO.v    # PicoRV32 总线到 UART TX 的 MMIO 包装
+│   ├── GPU/
+│   │   └── rectangleGpu.v   # RGB565 矩形裁剪与 64-pixel 长写事务
 │   ├── HDMI/
 │   │   ├── hdmiClock.v      # 126.667 MHz TMDS 与 25.333 MHz 像素时钟
 │   │   ├── hdmiTmdsEncoder.v # 8-bit 视频/控制符号到 10-bit TMDS
@@ -88,6 +90,7 @@ rv32/busMember/busManager.v
 rv32/busMember/psramController.v
 rv32/busMember/psramSwitcher.v
 rv32/busMember/psramPhy.v
+rv32/GPU/rectangleGpu.v
 rv32/busMember/uartProgramMemory.v
 rv32/busMember/rv32RegisterRam.v
 rv32/busMember/UARTRX.v
@@ -129,18 +132,21 @@ create_clock -name clock50MHz -period 20.000 \
 | `0x0000_4000`–`0x0000_7fff` | 16 KiB | 数据 BSRAM |
 | `0x0100_0000`–`0x0100_ffff` | 64 KiB | MMIO 窗口 |
 | `0x0200_0000`–`0x023f_ffff` | 4 MiB | 当前后台 die 的逻辑 PSRAM 窗口 |
-| `0x0300_0000`–`0x0300_0fff` | 4 KiB | PSRAM 状态、相位和换帧控制 |
+| `0x0300_0000`–`0x0300_0fff` | 4 KiB | HDMI/PSRAM 状态、相位和 HDMI 使能 |
+| `0x0300_1000`–`0x0300_1fff` | 4 KiB | front/back SwapController |
+| `0x0300_f000`–`0x0300_ffff` | 4 KiB | 矩形 GPU MMIO |
 
-PicoRV32 的复位入口是 `0x0000_0000`，初始栈顶配置为 `0x0000_8000`。
+PicoRV32 的复位入口是 `0x0000_0100`，IRQ 入口位于 `0x0000_0000`，初始栈顶
+配置为 `0x0000_8000`。
 程序区和数据区各为 `4096 x 32 bit`，两者都带有 Gowin
 `syn_ramstyle="block_ram"` 推导属性。存储数组本身不会在复位时清零，以免
 破坏 BSRAM 推导；软件不能读取尚未写入的数据 RAM。
 
-PSRAM 两个物理 die 各为 4 MiB。HDMI 端独占逻辑前台 die；CPU 与预留 GPU
-端口共享逻辑后台 die，GPU 在事务边界拥有更高优先级。向 `0x0300_0018`
+PSRAM 两个物理 die 各为 4 MiB。HDMI 端独占逻辑前台 die；CPU 与矩形 GPU
+共享逻辑后台 die，GPU 在事务边界拥有更高优先级。向 `0x0300_1008`
 写 bit 0 只挂起交换请求，只有 HDMI 给出一帧完成脉冲、在途事务全部结束后，
 switcher 才原子翻转 front/back 映射。没有 HDMI 时可同时写 bit 1 注入软件
-帧完成脉冲做上板测试；详细寄存器定义见 `hostutil/include/PSRAM.h`。
+帧完成脉冲完成启动期换页；软件接口见 `hostutil/include/SwapController.h`。
 
 PHY、switcher 与 GPU/HDMI 端口统一使用 1..64 个 16-bit beat 的
 突发接口（最大 128 字节）。CPU 的一次 `lw/sw` 只发送一次 CA，随后用两个
@@ -158,12 +164,14 @@ HDMI DMA 每次从 PSRAM 连续读取 64 个 16-bit 像素（128 字节），通
 underflow 调试标志。FIFO 的可读/可写数量按“本拍更新后的本地指针”寄存，
 避免队列见底时因计数滞后一拍而多读一个旧像素。
 
-固件先在逻辑 back die 绘制八色条，写 `0x0300_0018` 请求交换；交换只会在
+固件先在逻辑 back die 绘制八色条，写 `0x0300_1008` 请求交换；交换只会在
 当前 front 帧的最后一次 PSRAM burst 完成且两个 PHY 都空闲时发生。随后写
-`0x0300_0020` bit 0 启动 HDMI。HDMI 读取一帧完成后持续产生真实帧边界，
+`0x0300_001c` bit 0 启动 HDMI。HDMI 读取一帧完成后持续产生真实帧边界，
 因此后续软件只需要绘制 back、请求 swap，无需再写软件帧完成 bit。
 
-示例固件会先把两个 die 都初始化成相同色条，然后让一个 8x8 反色箭头水平
+八条色条由矩形 GPU 分别填充。每条宽 80 像素，GPU 对每一行自动生成一次
+64-pixel 和一次 16-pixel 写突发，CPU 只需写八组 MMIO 参数。示例随后让
+一个 8x8 反色箭头水平
 移动。一个 `lw` 取得两个相邻 RGB565 像素，软件只按箭头掩码异或对应半字，
 再用 `sw` 写回。旧位置直接按已知色条重新生成 8x8 背景，避免双缓冲中累积
 异或残影，然后在 back die 重画新位置；正常 HDMI 帧边界 swap 后才显示。
@@ -171,6 +179,27 @@ underflow 调试标志。FIFO 的可读/可写数量按“本拍更新后的本�
 RGB565 的有效像素流量约为 `640 * 480 * 2 * 60.3 = 37.0 MB/s`。单个 x8
 PSRAM die 在 80 MHz DDR 下的原始数据率为 160 MB/s；HDMI 独占 front die，
 不会与 CPU/GPU 的 back die 流量仲裁。
+
+## Rectangle GPU
+
+GPU 页面从 `0x0300_f000` 开始：
+
+| 偏移 | 访问 | 作用 |
+|---:|---|---|
+| `0x00` | R | magic `0x47505531`（`GPU1`） |
+| `0x04` | R | bit 0 busy；bits 31:16 完成计数 |
+| `0x08` | R/W | 矩形左上角 X |
+| `0x0c` | R/W | 矩形左上角 Y |
+| `0x10` | R/W | 宽度 |
+| `0x14` | R/W | 高度 |
+| `0x18` | R/W | RGB565 颜色 |
+| `0x1c` | W | bit 0 start |
+| `0x20` | R | `{height=480, width=640}` |
+
+硬件会把矩形裁剪到 framebuffer，按 1280 字节 stride 逐行寻址，再把每行
+拆成最多 64 个 RGB565 像素的长事务。纯色数据直接流向 PHY，因此这一版
+不消耗额外 BSRAM。软件封装分别位于 `GPU.c`、`SwapController.c` 和
+`hdmi_psram.c`。
 
 ## UART TX MMIO
 

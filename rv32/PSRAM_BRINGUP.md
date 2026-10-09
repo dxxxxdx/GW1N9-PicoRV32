@@ -57,9 +57,10 @@ without backpressure, so an HDMI reader must reserve enough line-FIFO space
 before issuing its command.  `*_done` releases ownership after the physical
 recovery interval.
 
-The top level ties the future GPU port inactive for now.  HDMI is connected to
-front through `psramHdmiReader`: it issues 64-beat reads and crosses the data
-to the pixel clock through one 512 x 16 dual-clock BSRAM FIFO.
+The `rectangleGpu` drives the back write port with solid-color row bursts.
+HDMI is connected to front through `psramHdmiReader`: it issues 64-beat reads
+and crosses the data to the pixel clock through one 512 x 16 dual-clock BSRAM
+FIFO.
 
 ## Frame swap handshake
 
@@ -72,30 +73,37 @@ While HDMI is disabled, MMIO bit 1 injects a software frame-done event so both
 physical dies can be tested through the one logical window.  Once HDMI is
 enabled, its last burst of each frame supplies the production frame-done event.
 
-## Configuration window
+## MMIO pages
 
-The configuration window remains at `0x0300_0000`:
+HDMI/PSRAM status is at `0x0300_0000`:
 
 | Offset | Access | Description |
 |---:|---|---|
 | `0x00` | R | PHY frequency, `80_000_000` |
-| `0x04` | R | init/busy/die-ready/swap/front/back/GPU/HDMI status |
+| `0x04` | R | init/busy/die-ready/GPU/HDMI status |
 | `0x08` | R/W | rPLL phase tap, reset value 5 |
-| `0x0c` | R | version `0x50534232` (`PSB2`, explicit 128-byte CR0 burst) |
+| `0x0c` | R | magic `0x48505331` (`HPS1`) |
 | `0x10` | R | phase-clock activity counter |
 | `0x14` | R | CPU-visible logical bytes, `0x0040_0000` |
-| `0x18` | R/W | swap status/control |
-| `0x1c` | R | total physical bytes, `0x0080_0000` |
-| `0x20` | R/W | HDMI enable, bit 0 |
+| `0x18` | R | total physical bytes, `0x0080_0000` |
+| `0x1c` | R/W | HDMI enable, bit 0 |
 
-`0x18` writes:
+Swap control is isolated at `0x0300_1000`:
+
+| Offset | Access | Description |
+|---:|---|---|
+| `0x00` | R | magic `0x53575031` (`SWP1`) |
+| `0x04` | R | status and completed-swap count |
+| `0x08` | W | request control |
+
+`0x08` writes:
 
 ```text
 bit 0 = request swap at the next HDMI frame boundary
 bit 1 = inject frame-done for pre-HDMI testing only
 ```
 
-`0x18` reads:
+`0x04` reads:
 
 ```text
 bit 0      = swap pending
@@ -105,11 +113,15 @@ bit 3      = request level presented to HDMI
 bits 31:16 = completed swap count
 ```
 
+The rectangle GPU is in the last 4 KiB page, `0x0300_f000`. Its registers
+are X, Y, width, height, RGB565 color and START; status bit 0 remains high from
+START until every PSRAM write burst has completed.
+
 ## Firmware startup
 
 The current firmware writes the characterized phase tap 5 from `start.S` and
-does not run destructive lane, full-memory, or swap-stress tests.  It draws the
-two color-bar framebuffers, uses one software-injected frame boundary to reach
+does not run destructive lane, full-memory, or swap-stress tests. The GPU draws
+the two color-bar framebuffers, uses one software-injected frame boundary to reach
 the other physical die before HDMI starts, then enables normal HDMI-driven
 front/back swaps.
 
@@ -131,7 +143,8 @@ The video clock tree is 126.667 MHz serializer `/5` to 25.333 MHz pixel clock.
 With the Tang Nano 800x525 raster this is about 60.3 Hz and about 37.0 MB/s of
 active RGB565 reads.  Each front die has a raw 160 MB/s data rate at 80 MHz DDR.
 
-The GPU placeholder uses the same burst shape on back; its priority over the
-CPU is already enforced at the switcher boundary.  The PHY intentionally
-contains no 128-byte buffer, so the future GPU may add its own BSRAM without
-duplicating storage in every PHY.
+The rectangle GPU clips commands to 640x480, computes the 1280-byte row stride
+with shifts/adds, and splits each row into at most 64-pixel writes. A solid
+fill streams one color directly and needs no BSRAM. GPU priority over CPU is
+enforced at each switcher command boundary; software waits for GPU idle before
+direct CPU framebuffer access.

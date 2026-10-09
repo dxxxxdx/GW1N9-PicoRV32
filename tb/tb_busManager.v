@@ -38,6 +38,18 @@ module tb_busManager;
     wire [31:0] psramcfg_addr, psramcfg_wdata;
     wire [3:0] psramcfg_wstrb;
     reg  [31:0] psramcfg_rdata = 32'h5053_5253;
+
+    wire swapcfg_valid, swapcfg_instr;
+    reg  swapcfg_ready = 0;
+    wire [31:0] swapcfg_addr, swapcfg_wdata;
+    wire [3:0] swapcfg_wstrb;
+    reg  [31:0] swapcfg_rdata = 32'h5357_5031;
+
+    wire gpucfg_valid, gpucfg_instr;
+    reg  gpucfg_ready = 0;
+    wire [31:0] gpucfg_addr, gpucfg_wdata;
+    wire [3:0] gpucfg_wstrb;
+    reg  [31:0] gpucfg_rdata = 32'h4750_5531;
     wire unmapped_valid;
 
     busManager dut (
@@ -70,6 +82,14 @@ module tb_busManager;
         .psramcfg_ready(psramcfg_ready), .psramcfg_addr(psramcfg_addr),
         .psramcfg_wdata(psramcfg_wdata), .psramcfg_wstrb(psramcfg_wstrb),
         .psramcfg_rdata(psramcfg_rdata),
+        .swapcfg_valid(swapcfg_valid), .swapcfg_instr(swapcfg_instr),
+        .swapcfg_ready(swapcfg_ready), .swapcfg_addr(swapcfg_addr),
+        .swapcfg_wdata(swapcfg_wdata), .swapcfg_wstrb(swapcfg_wstrb),
+        .swapcfg_rdata(swapcfg_rdata),
+        .gpucfg_valid(gpucfg_valid), .gpucfg_instr(gpucfg_instr),
+        .gpucfg_ready(gpucfg_ready), .gpucfg_addr(gpucfg_addr),
+        .gpucfg_wdata(gpucfg_wdata), .gpucfg_wstrb(gpucfg_wstrb),
+        .gpucfg_rdata(gpucfg_rdata),
         .unmapped_valid(unmapped_valid)
     );
 
@@ -85,6 +105,8 @@ module tb_busManager;
             mmio_ready = 0;
             psram_ready = 0;
             psramcfg_ready = 0;
+            swapcfg_ready = 0;
+            gpucfg_ready = 0;
             #1;
         end
     endtask
@@ -95,12 +117,16 @@ module tb_busManager;
         input expected_mmio;
         input expected_psram;
         input expected_psramcfg;
+        input expected_swapcfg;
+        input expected_gpucfg;
         input expected_unmapped;
         begin
             if ({flash_valid, sram_valid, mmio_valid, psram_valid,
-                 psramcfg_valid, unmapped_valid} !==
+                 psramcfg_valid, swapcfg_valid, gpucfg_valid,
+                 unmapped_valid} !==
                 {expected_flash, expected_sram, expected_mmio,
-                 expected_psram, expected_psramcfg, expected_unmapped})
+                 expected_psram, expected_psramcfg, expected_swapcfg,
+                 expected_gpucfg, expected_unmapped})
                 $fatal(1, "Bad route at address %08x", mem_addr);
         end
     endtask
@@ -113,7 +139,7 @@ module tb_busManager;
         mem_instr = 1;
         mem_addr = 32'h0000_0000;
         #1;
-        assert_one_hot(1, 0, 0, 0, 0, 0);
+        assert_one_hot(1, 0, 0, 0, 0, 0, 0, 0);
         if (flash_addr !== 0 || mem_ready !== 0 || !flash_instr)
             $fatal(1, "Flash lower boundary/backpressure failed");
         flash_ready = 1;
@@ -132,7 +158,7 @@ module tb_busManager;
         mem_wdata = 32'ha5a5_5a5a;
         mem_wstrb = 4'b0101;
         #1;
-        assert_one_hot(0, 1, 0, 0, 0, 0);
+        assert_one_hot(0, 1, 0, 0, 0, 0, 0, 0);
         if (sram_addr !== 0 || sram_wdata !== mem_wdata ||
             sram_wstrb !== mem_wstrb || mem_ready !== 0)
             $fatal(1, "SRAM forwarding failed");
@@ -151,7 +177,7 @@ module tb_busManager;
         mem_addr = 32'h0100_0000;
         mmio_ready = 1;
         #1;
-        assert_one_hot(0, 0, 1, 0, 0, 0);
+        assert_one_hot(0, 0, 1, 0, 0, 0, 0, 0);
         if (mmio_addr !== 0 || !mem_ready || mem_rdata !== mmio_rdata)
             $fatal(1, "MMIO lower boundary failed");
         mem_addr = 32'h0100_fffc;
@@ -165,7 +191,7 @@ module tb_busManager;
         mem_addr = 32'h0200_0000;
         psram_ready = 1;
         #1;
-        assert_one_hot(0, 0, 0, 1, 0, 0);
+        assert_one_hot(0, 0, 0, 1, 0, 0, 0, 0);
         if (psram_addr !== 0 || !mem_ready || mem_rdata !== psram_rdata)
             $fatal(1, "PSRAM lower boundary failed");
         mem_addr = 32'h023f_fffc;
@@ -174,7 +200,7 @@ module tb_busManager;
             $fatal(1, "PSRAM upper boundary failed");
         mem_addr = 32'h0240_0000;
         #1;
-        assert_one_hot(0, 0, 0, 0, 0, 1);
+        assert_one_hot(0, 0, 0, 0, 0, 0, 0, 1);
         clear_request;
 
         // PSRAM diagnostics window boundaries.
@@ -182,7 +208,7 @@ module tb_busManager;
         mem_addr = 32'h0300_0000;
         psramcfg_ready = 1;
         #1;
-        assert_one_hot(0, 0, 0, 0, 1, 0);
+        assert_one_hot(0, 0, 0, 0, 1, 0, 0, 0);
         if (psramcfg_addr !== 0 || !mem_ready ||
             mem_rdata !== psramcfg_rdata)
             $fatal(1, "PSRAM config lower boundary failed");
@@ -192,22 +218,45 @@ module tb_busManager;
             $fatal(1, "PSRAM config upper boundary failed");
         clear_request;
 
+        // Swap controller and GPU occupy separate 4 KiB pages.
+        mem_valid = 1;
+        mem_addr = 32'h0300_1000;
+        swapcfg_ready = 1;
+        #1;
+        assert_one_hot(0, 0, 0, 0, 0, 1, 0, 0);
+        if (swapcfg_addr !== 0 || !mem_ready || mem_rdata !== swapcfg_rdata)
+            $fatal(1, "swap-controller page failed");
+        clear_request;
+
+        mem_valid = 1;
+        mem_addr = 32'h0300_f000;
+        gpucfg_ready = 1;
+        #1;
+        assert_one_hot(0, 0, 0, 0, 0, 0, 1, 0);
+        if (gpucfg_addr !== 0 || !mem_ready || mem_rdata !== gpucfg_rdata)
+            $fatal(1, "GPU page failed");
+        mem_addr = 32'h0300_fffc;
+        #1;
+        if (gpucfg_addr !== 32'h0000_0ffc)
+            $fatal(1, "GPU page upper boundary failed");
+        clear_request;
+
         // Gaps complete immediately and return zero.
         mem_valid = 1;
         mem_addr = 32'h0000_8000;
         #1;
-        assert_one_hot(0, 0, 0, 0, 0, 1);
+        assert_one_hot(0, 0, 0, 0, 0, 0, 0, 1);
         if (!mem_ready || mem_rdata !== 0)
             $fatal(1, "Unmapped low gap failed");
         mem_addr = 32'h0101_0000;
         #1;
-        assert_one_hot(0, 0, 0, 0, 0, 1);
+        assert_one_hot(0, 0, 0, 0, 0, 0, 0, 1);
         if (!mem_ready || mem_rdata !== 0)
             $fatal(1, "Unmapped high gap failed");
         clear_request;
 
         // No target may be valid while the CPU bus is idle.
-        assert_one_hot(0, 0, 0, 0, 0, 0);
+        assert_one_hot(0, 0, 0, 0, 0, 0, 0, 0);
         if (mem_ready !== 0)
             $fatal(1, "mem_ready asserted while idle");
 

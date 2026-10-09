@@ -13,8 +13,8 @@
 // carries only a low 16-bit value; the bridge serializes/deserializes the two
 // halves while the PHY keeps CS asserted and sends CA only once.  The
 // CPU-to-PHY crossing uses a request/acknowledge toggle with bundled data.
-// The HDMI port is active; the future GPU port is already present in the PHY
-// clock domain and is currently tied off at the top level.
+// The HDMI reader and rectangle GPU both use native burst ports in the PHY
+// clock domain.
 //------------------------------------------------------------------------------
 module psramController #(
     parameter integer PHY_FREQ_HZ = 80_000_000,
@@ -39,7 +39,14 @@ module psramController #(
     input  wire [ 3:0] cfg_wstrb,
     output reg  [31:0] cfg_rdata,
 
-    // Future GPU burst port, synchronous to phy_clk.  Length is expressed in
+    input  wire        swapcfg_valid,
+    output reg         swapcfg_ready,
+    input  wire [11:0] swapcfg_addr,
+    input  wire [31:0] swapcfg_wdata,
+    input  wire [ 3:0] swapcfg_wstrb,
+    output reg  [31:0] swapcfg_rdata,
+
+    // Rectangle-GPU burst port, synchronous to phy_clk. Length is expressed in
     // 16-bit beats (1..64).  The current low 16-bit write beat advances on
     // gpu_w_take; returned read beats cannot be back-pressured.
     input  wire        gpu_cmd_valid,
@@ -290,6 +297,10 @@ module psramController #(
     wire frameDonePulsePhy = hdmi_frame_done || softFramePulsePhy;
 
     // ------------------------------------------------------------- switcher/PHY
+    wire switchCmdValid0, switchCmdReady0, switchWr0;
+    wire [21:0] switchAddr0;
+    wire [6:0] switchWords0;
+    wire switchPipeBusy0;
     wire phyCmdValid0, phyCmdReady0, phyWr0;
     wire [21:0] phyAddr0;
     wire [6:0] phyWords0;
@@ -299,6 +310,10 @@ module psramController #(
     wire phyWTake0, phyRvalid0, phyRlast0;
     wire phyBusy0, phyDone0;
 
+    wire switchCmdValid1, switchCmdReady1, switchWr1;
+    wire [21:0] switchAddr1;
+    wire [6:0] switchWords1;
+    wire switchPipeBusy1;
     wire phyCmdValid1, phyCmdReady1, phyWr1;
     wire [21:0] phyAddr1;
     wire [6:0] phyWords1;
@@ -344,20 +359,43 @@ module psramController #(
         .front_die(switchFrontDie), .back_die(switchBackDie),
         .any_busy(switchBusy), .gpu_active(switchGpuActive),
         .hdmi_active(switchHdmiActive),
-        .phy0_cmd_valid(phyCmdValid0), .phy0_cmd_ready(phyCmdReady0),
-        .phy0_cmd_wr(phyWr0), .phy0_cmd_addr(phyAddr0),
-        .phy0_cmd_words(phyWords0), .phy0_w_data(phyDin0),
+        .phy0_cmd_valid(switchCmdValid0), .phy0_cmd_ready(switchCmdReady0),
+        .phy0_cmd_wr(switchWr0), .phy0_cmd_addr(switchAddr0),
+        .phy0_cmd_words(switchWords0), .phy0_w_data(phyDin0),
         .phy0_w_mask(phyMask0), .phy0_w_take(phyWTake0),
         .phy0_r_data(phyDout0), .phy0_r_valid(phyRvalid0),
-        .phy0_r_last(phyRlast0), .phy0_busy(phyBusy0),
+        .phy0_r_last(phyRlast0), .phy0_busy(switchPipeBusy0),
         .phy0_done(phyDone0), .phy0_init_done(phyInitDone0),
-        .phy1_cmd_valid(phyCmdValid1), .phy1_cmd_ready(phyCmdReady1),
-        .phy1_cmd_wr(phyWr1), .phy1_cmd_addr(phyAddr1),
-        .phy1_cmd_words(phyWords1), .phy1_w_data(phyDin1),
+        .phy1_cmd_valid(switchCmdValid1), .phy1_cmd_ready(switchCmdReady1),
+        .phy1_cmd_wr(switchWr1), .phy1_cmd_addr(switchAddr1),
+        .phy1_cmd_words(switchWords1), .phy1_w_data(phyDin1),
         .phy1_w_mask(phyMask1), .phy1_w_take(phyWTake1),
         .phy1_r_data(phyDout1), .phy1_r_valid(phyRvalid1),
-        .phy1_r_last(phyRlast1), .phy1_busy(phyBusy1),
+        .phy1_r_last(phyRlast1), .phy1_busy(switchPipeBusy1),
         .phy1_done(phyDone1), .phy1_init_done(phyInitDone1)
+    );
+
+    // Register commands at the switcher/PHY boundary.  Apart from making the
+    // interface a conventional decoupled valid/ready channel, this keeps the
+    // arbiter and GPU command paths out of the PHY's DDR output timing cone.
+    // The switcher records ownership when a pipe accepts a command and holds
+    // it until the real PHY reports done, so streaming data remains direct.
+    psramCommandPipe commandPipe0 (
+        .clk(phy_clk), .reset_n(phyReset_n),
+        .in_valid(switchCmdValid0), .in_ready(switchCmdReady0),
+        .in_write(switchWr0), .in_addr(switchAddr0),
+        .in_words(switchWords0), .pipe_busy(switchPipeBusy0),
+        .out_valid(phyCmdValid0), .out_ready(phyCmdReady0),
+        .out_write(phyWr0), .out_addr(phyAddr0), .out_words(phyWords0)
+    );
+
+    psramCommandPipe commandPipe1 (
+        .clk(phy_clk), .reset_n(phyReset_n),
+        .in_valid(switchCmdValid1), .in_ready(switchCmdReady1),
+        .in_write(switchWr1), .in_addr(switchAddr1),
+        .in_words(switchWords1), .pipe_busy(switchPipeBusy1),
+        .out_valid(phyCmdValid1), .out_ready(phyCmdReady1),
+        .out_write(phyWr1), .out_addr(phyAddr1), .out_words(phyWords1)
     );
 
     psramPhy #(
@@ -469,28 +507,18 @@ module psramController #(
         end
     end
 
-    // ---------------------------------------------------------- config/MMIO
-    // 0x18 write bit0: request swap at next HDMI frame boundary.
-    // 0x18 write bit1: inject a frame-done pulse for pre-HDMI board testing.
+    // ------------------------------------------------------ HDMI/PSRAM MMIO
     always @(posedge clk) begin
         if (!reset_n) begin
-            cfg_ready          <= 1'b0;
-            ckPhaseR           <= 4'd5;
-            swapReqToggleCpu   <= 1'b0;
-            softFrameToggleCpu <= 1'b0;
-            hdmi_enable        <= 1'b0;
+            cfg_ready   <= 1'b0;
+            ckPhaseR    <= 4'd5;
+            hdmi_enable <= 1'b0;
         end else begin
             cfg_ready <= cfg_valid;
             if (cfg_valid && !cfg_ready && cfg_wstrb[0]) begin
                 if (cfg_addr[5:2] == 4'd2)
                     ckPhaseR <= cfg_wdata[3:0];
-                if (cfg_addr[5:2] == 4'd6) begin
-                    if (cfg_wdata[0])
-                        swapReqToggleCpu <= ~swapReqToggleCpu;
-                    if (cfg_wdata[1])
-                        softFrameToggleCpu <= ~softFrameToggleCpu;
-                end
-                if (cfg_addr[5:2] == 4'd8)
+                if (cfg_addr[5:2] == 4'd7)
                     hdmi_enable <= cfg_wdata[0];
             end
         end
@@ -499,23 +527,94 @@ module psramController #(
     always @* begin
         case (cfg_addr[5:2])
             4'd0: cfg_rdata = PHY_FREQ_HZ;
-            4'd1: cfg_rdata = {23'd0, hdmiSyncCpu, gpuSyncCpu,
-                               backSyncCpu, frontSyncCpu, pendingSyncCpu,
+            4'd1: cfg_rdata = {26'd0, hdmiSyncCpu, gpuSyncCpu,
                                init1SyncCpu, init0SyncCpu,
                                busySyncCpu, initDoneCpu};
             4'd2: cfg_rdata = {28'd0, ckPhaseR};
-            4'd3: cfg_rdata = 32'h5053_4232; // "PSB2": CR0 128-byte bursts
+            4'd3: cfg_rdata = 32'h4850_5331; // "HPS1": HDMI/PSRAM page v1
             4'd4: cfg_rdata = {16'd0, ckpCntSync};
             4'd5: cfg_rdata = 32'h0040_0000; // CPU-visible logical back bytes
-            4'd6: cfg_rdata = {swapCountCpu, 12'd0, pendingSyncCpu,
-                               backSyncCpu, frontSyncCpu, pendingSyncCpu};
-            4'd7: cfg_rdata = 32'h0080_0000; // total physical PSRAM bytes
-            4'd8: cfg_rdata = {31'd0, hdmi_enable};
+            4'd6: cfg_rdata = 32'h0080_0000; // total physical PSRAM bytes
+            4'd7: cfg_rdata = {31'd0, hdmi_enable};
             default: cfg_rdata = 32'd0;
         endcase
     end
 
+    // ---------------------------------------------------------- swap MMIO
+    // Control +0x08 bit0 requests a swap at the next HDMI frame boundary.
+    // Bit1 injects a pre-HDMI software frame boundary for boot initialization.
+    always @(posedge clk) begin
+        if (!reset_n) begin
+            swapcfg_ready      <= 1'b0;
+            swapReqToggleCpu   <= 1'b0;
+            softFrameToggleCpu <= 1'b0;
+        end else begin
+            swapcfg_ready <= swapcfg_valid;
+            if (swapcfg_valid && !swapcfg_ready && swapcfg_wstrb[0] &&
+                swapcfg_addr[5:2] == 4'd2) begin
+                if (swapcfg_wdata[0])
+                    swapReqToggleCpu <= ~swapReqToggleCpu;
+                if (swapcfg_wdata[1])
+                    softFrameToggleCpu <= ~softFrameToggleCpu;
+            end
+        end
+    end
+
+    always @* begin
+        case (swapcfg_addr[5:2])
+            4'd0: swapcfg_rdata = 32'h5357_5031; // "SWP1"
+            4'd1: swapcfg_rdata = {swapCountCpu, 12'd0, pendingSyncCpu,
+                                    backSyncCpu, frontSyncCpu, pendingSyncCpu};
+            default: swapcfg_rdata = 32'd0;
+        endcase
+    end
+
     wire unusedPhysicalSwapCount = ^switchSwapCount;
+endmodule
+
+// One-entry command skid stage.  pipe_busy deliberately describes only this
+// stage: once accepted, psramSwitcher.active* keeps that die unavailable until
+// the PHY done pulse.  This removes the physical busy/state signal from the
+// client-side ready path without permitting a second command onto the die.
+module psramCommandPipe (
+    input  wire        clk,
+    input  wire        reset_n,
+    input  wire        in_valid,
+    output wire        in_ready,
+    input  wire        in_write,
+    input  wire [21:0] in_addr,
+    input  wire [ 6:0] in_words,
+    output wire        pipe_busy,
+    output wire        out_valid,
+    input  wire        out_ready,
+    output reg         out_write,
+    output reg  [21:0] out_addr,
+    output reg  [ 6:0] out_words
+);
+    reg pending;
+
+    assign in_ready = !pending;
+    assign pipe_busy = pending;
+    assign out_valid = pending;
+
+    always @(posedge clk) begin
+        if (!reset_n) begin
+            pending   <= 1'b0;
+            out_write <= 1'b0;
+            out_addr  <= 22'd0;
+            out_words <= 7'd1;
+        end else begin
+            if (pending && out_ready)
+                pending <= 1'b0;
+
+            if (in_valid && in_ready) begin
+                pending   <= 1'b1;
+                out_write <= in_write;
+                out_addr  <= in_addr;
+                out_words <= in_words;
+            end
+        end
+    end
 endmodule
 
 `default_nettype wire

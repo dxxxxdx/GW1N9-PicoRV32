@@ -79,10 +79,14 @@ add_executable(firmware
     helloworld/main.c
     hostutil/include/UART.c
     hostutil/include/IRQ.c
-    hostutil/include/PSRAM.c
+    hostutil/include/hdmi_psram.c
+    hostutil/include/SwapController.c
+    hostutil/include/GPU.c
     hostutil/dxxdx_start_ld/start.S
     hostutil/dxxdx_start_ld/vectors.S
-        hostutil/include/PSRAM.h
+    hostutil/include/hdmi_psram.h
+    hostutil/include/SwapController.h
+    hostutil/include/GPU.h
 )
 
 set_target_properties(firmware PROPERTIES

@@ -12,7 +12,7 @@ set_option -print_all_synthesis_warning 1
 set_option -timing_driven 1
 # Higher-effort placement/routing is needed because the design runs 80 MHz
 # PSRAM and 126.667 MHz OSER clocks concurrently.
-set_option -place_option 1
+set_option -place_option 2
 set_option -route_option 2
 
 # irq_n is on the package's multiplexed SSPI pin 56.

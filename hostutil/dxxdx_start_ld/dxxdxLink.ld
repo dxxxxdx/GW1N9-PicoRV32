@@ -9,7 +9,9 @@ ENTRY(_start)
  * 0x0000_0100 - 0x0000_3fff: _start, .text / .rodata and the .data load image
  * 0x0000_4000 - 0x0000_7fff: data BSRAM
  * 0x0200_0000 - 0x023f_ffff: logical PSRAM back die, 4 MiB (.psram)
- * 0x0300_0000 - 0x0300_0fff: PSRAM config window    (__psram_cfg_base)
+ * 0x0300_0000 - 0x0300_0fff: HDMI/PSRAM config     (__hdmi_psram_cfg_base)
+ * 0x0300_1000 - 0x0300_1fff: frame-swap controller (__swap_controller_base)
+ * 0x0300_f000 - 0x0300_ffff: rectangle GPU MMIO    (__gpu_mmio_base)
  *
  * There is no external SPI flash in the current system. Initialized data is
  * stored in the program image and must be copied to DATA_RAM by _start.
@@ -24,7 +26,9 @@ MEMORY
     PROGRAM_RAM (rx)  : ORIGIN = 0x00000000, LENGTH = 16K
     DATA_RAM    (rw)  : ORIGIN = 0x00004000, LENGTH = 16K
     PSRAM       (rw)  : ORIGIN = 0x02000000, LENGTH = 4M
-    PSRAM_CFG   (rw)  : ORIGIN = 0x03000000, LENGTH = 4K
+    HDMI_PSRAM_CFG (rw) : ORIGIN = 0x03000000, LENGTH = 4K
+    SWAP_CONTROLLER (rw) : ORIGIN = 0x03001000, LENGTH = 4K
+    GPU_MMIO       (rw) : ORIGIN = 0x0300F000, LENGTH = 4K
 }
 
 SECTIONS
@@ -160,9 +164,10 @@ SECTIONS
     __psram_base  = ORIGIN(PSRAM);
     __psram_limit = ORIGIN(PSRAM) + LENGTH(PSRAM);
 
-    /* PSRAM 只读诊断窗口（频率、双 die 状态、相位和版本）。 */
-    __psram_cfg_base  = ORIGIN(PSRAM_CFG);
-    __psram_cfg_limit = ORIGIN(PSRAM_CFG) + LENGTH(PSRAM_CFG);
+    /* Independent MMIO pages; no data sections are placed in these regions. */
+    __hdmi_psram_cfg_base = ORIGIN(HDMI_PSRAM_CFG);
+    __swap_controller_base = ORIGIN(SWAP_CONTROLLER);
+    __gpu_mmio_base = ORIGIN(GPU_MMIO);
 
     /DISCARD/ :
     {

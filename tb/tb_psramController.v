@@ -115,6 +115,13 @@ module tb_psramController;
     reg [3:0] cfg_wstrb = 4'd0;
     wire [31:0] cfg_rdata;
 
+    reg swapcfg_valid = 1'b0;
+    wire swapcfg_ready;
+    reg [11:0] swapcfg_addr = 12'd0;
+    reg [31:0] swapcfg_wdata = 32'd0;
+    reg [3:0] swapcfg_wstrb = 4'd0;
+    wire [31:0] swapcfg_rdata;
+
     reg gpu_cmd_valid = 1'b0;
     wire gpu_cmd_ready;
     reg gpu_cmd_wr = 1'b0;
@@ -149,6 +156,9 @@ module tb_psramController;
         .mem_wdata(mem_wdata), .mem_wstrb(mem_wstrb), .mem_rdata(mem_rdata),
         .cfg_valid(cfg_valid), .cfg_ready(cfg_ready), .cfg_addr(cfg_addr),
         .cfg_wdata(cfg_wdata), .cfg_wstrb(cfg_wstrb), .cfg_rdata(cfg_rdata),
+        .swapcfg_valid(swapcfg_valid), .swapcfg_ready(swapcfg_ready),
+        .swapcfg_addr(swapcfg_addr), .swapcfg_wdata(swapcfg_wdata),
+        .swapcfg_wstrb(swapcfg_wstrb), .swapcfg_rdata(swapcfg_rdata),
         .gpu_cmd_valid(gpu_cmd_valid), .gpu_cmd_ready(gpu_cmd_ready),
         .gpu_cmd_wr(gpu_cmd_wr), .gpu_cmd_addr(gpu_cmd_addr),
         .gpu_cmd_words(gpu_cmd_words), .gpu_w_data(gpu_w_data),
@@ -183,6 +193,40 @@ module tb_psramController;
             @(negedge clk);
             mem_valid = 1'b0;
             mem_wstrb = 4'd0;
+            @(negedge clk);
+        end
+    endtask
+
+    task swapcfg_write;
+        input [11:0] addr;
+        input [31:0] data;
+        begin
+            @(negedge clk);
+            swapcfg_addr = addr;
+            swapcfg_wdata = data;
+            swapcfg_wstrb = 4'b1111;
+            swapcfg_valid = 1'b1;
+            while (!swapcfg_ready)
+                @(negedge clk);
+            swapcfg_valid = 1'b0;
+            swapcfg_wstrb = 4'd0;
+            @(negedge clk);
+        end
+    endtask
+
+    task swapcfg_read;
+        input [11:0] addr;
+        input [31:0] expected;
+        begin
+            @(negedge clk);
+            swapcfg_addr = addr;
+            swapcfg_valid = 1'b1;
+            while (!swapcfg_ready)
+                @(negedge clk);
+            if (swapcfg_rdata !== expected)
+                $fatal(1, "swapcfg %03x got %08x expected %08x",
+                       addr, swapcfg_rdata, expected);
+            swapcfg_valid = 1'b0;
             @(negedge clk);
         end
     endtask
@@ -235,6 +279,42 @@ module tb_psramController;
         if (phase !== 4'd5)
             $fatal(1, "phase did not reset to fixed tap 5");
 
+        // Exercise both registered switcher/PHY command pipes at once.  GPU
+        // owns logical back (die 0 at reset) while HDMI owns front (die 1).
+        base0 = dut.phy0.requestCount;
+        base1 = dut.phy1.requestCount;
+        beat0 = dut.phy0.beatCount;
+        @(negedge phy_clk);
+        gpu_cmd_wr = 1'b1;
+        gpu_cmd_addr = 22'h000200;
+        gpu_cmd_words = 7'd3;
+        gpu_w_data = 16'hbeef;
+        gpu_w_mask = 2'b00;
+        gpu_cmd_valid = 1'b1;
+        hdmi_cmd_addr = 22'h000400;
+        hdmi_cmd_words = 7'd4;
+        hdmi_cmd_valid = 1'b1;
+        while (!(gpu_cmd_ready && hdmi_cmd_ready))
+            @(negedge phy_clk);
+        @(posedge phy_clk);
+        @(negedge phy_clk);
+        gpu_cmd_valid = 1'b0;
+        hdmi_cmd_valid = 1'b0;
+        wait (!dut.switchBusy);
+        @(negedge phy_clk);
+        if (dut.phy0.requestCount != base0 + 1 ||
+            dut.phy1.requestCount != base1 + 1 ||
+            dut.phy0.logWr[base0] !== 1'b1 ||
+            dut.phy0.logAddr[base0] !== 22'h000200 ||
+            dut.phy0.logWords[base0] !== 7'd3 ||
+            dut.phy0.logData[beat0] !== 16'hbeef ||
+            dut.phy0.logData[beat0+1] !== 16'hbeef ||
+            dut.phy0.logData[beat0+2] !== 16'hbeef ||
+            dut.phy1.logWr[base1] !== 1'b0 ||
+            dut.phy1.logAddr[base1] !== 22'h000400 ||
+            dut.phy1.logWords[base1] !== 7'd4)
+            $fatal(1, "registered GPU/HDMI command pipes failed");
+
         // The only CPU-visible window initially maps to back die 0.
         base0 = dut.phy0.requestCount;
         base1 = dut.phy1.requestCount;
@@ -251,10 +331,10 @@ module tb_psramController;
             $fatal(1, "logical back window did not route to die 0");
 
         // MMIO request + software frame boundary flips only the ownership map.
-        cfg_write(12'h018, 32'h0000_0003);
+        swapcfg_write(12'h008, 32'h0000_0003);
         wait (dut.swapCountCpu == 16'd1);
         repeat (3) @(negedge clk);
-        cfg_read(12'h018, 32'h0001_0004); // front=0, back=1, no pending
+        swapcfg_read(12'h004, 32'h0001_0004); // front=0, back=1
 
         // The same logical CPU address now reaches physical die 1.
         base0 = dut.phy0.requestCount;
@@ -292,14 +372,15 @@ module tb_psramController;
             $fatal(1, "swapped die read/CDC failed: %08x", mem_rdata);
 
         // Request alone is sticky and must not swap before a frame boundary.
-        cfg_write(12'h018, 32'h0000_0001);
+        swapcfg_write(12'h008, 32'h0000_0001);
         repeat (12) @(negedge clk);
         if (!frame_swap_request || dut.swapCountCpu != 16'd1)
             $fatal(1, "swap request did not wait for frame boundary");
-        cfg_write(12'h018, 32'h0000_0002);
+        swapcfg_write(12'h008, 32'h0000_0002);
         wait (dut.swapCountCpu == 16'd2);
         repeat (3) @(negedge clk);
-        cfg_read(12'h018, 32'h0002_0002); // front=1, back=0, no pending
+        swapcfg_read(12'h004, 32'h0002_0002); // front=1, back=0
+        swapcfg_read(12'h000, 32'h5357_5031);
 
         cfg_read(12'h000, 32'd80_000_000);
         cfg_read(12'h008, 32'd5);
@@ -307,12 +388,12 @@ module tb_psramController;
         cfg_read(12'h008, 32'd11);
         if (phase !== 4'd11)
             $fatal(1, "dynamic phase write failed");
-        cfg_read(12'h00c, 32'h5053_4232);
+        cfg_read(12'h00c, 32'h4850_5331);
         cfg_read(12'h014, 32'h0040_0000);
-        cfg_read(12'h01c, 32'h0080_0000);
-        cfg_read(12'h020, 32'd0);
-        cfg_write(12'h020, 32'd1);
-        cfg_read(12'h020, 32'd1);
+        cfg_read(12'h018, 32'h0080_0000);
+        cfg_read(12'h01c, 32'd0);
+        cfg_write(12'h01c, 32'd1);
+        cfg_read(12'h01c, 32'd1);
 
         $display("PASS: logical back window, frame swap, CDC, masks and handshake");
         $finish;

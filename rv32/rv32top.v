@@ -11,7 +11,7 @@
 //   - 50MHz 晶振经 rPLL 产生 CPU 40MHz、PSRAM PHY 80MHz；
 //   - PSRAM 4 MiB 逻辑后台窗口 0x0200_0000~0x023f_ffff；
 //   - 两个物理 die 由 front/back switcher 管理，MMIO 在帧边界请求交换；
-//   - PSRAM 诊断窗口 0x0300_0000，提供初始化、相位和交换控制；
+//   - HDMI/PSRAM、换帧和矩形 GPU 分别使用独立的 4 KiB MMIO 页；
 //   - 不实例化 SPI Flash。
 //
 // reset_n、start、irq_n 都是低有效物理按键：默认上拉为 1，按下接地为 0。
@@ -308,6 +308,22 @@ module rv32top #(
     wire [3:0] psramcfg_wstrb;
     wire [31:0] psramcfg_rdata;
 
+    wire swapcfg_valid;
+    wire swapcfg_instr;
+    wire swapcfg_ready;
+    wire [31:0] swapcfg_addr;
+    wire [31:0] swapcfg_wdata;
+    wire [3:0] swapcfg_wstrb;
+    wire [31:0] swapcfg_rdata;
+
+    wire gpucfg_valid;
+    wire gpucfg_instr;
+    wire gpucfg_ready;
+    wire [31:0] gpucfg_addr;
+    wire [31:0] gpucfg_wdata;
+    wire [3:0] gpucfg_wstrb;
+    wire [31:0] gpucfg_rdata;
+
     wire unmapped_valid;
 
     busManager router (
@@ -340,6 +356,16 @@ module rv32top #(
         .psramcfg_ready(psramcfg_ready), .psramcfg_addr(psramcfg_addr),
         .psramcfg_wdata(psramcfg_wdata), .psramcfg_wstrb(psramcfg_wstrb),
         .psramcfg_rdata(psramcfg_rdata),
+
+        .swapcfg_valid(swapcfg_valid), .swapcfg_instr(swapcfg_instr),
+        .swapcfg_ready(swapcfg_ready), .swapcfg_addr(swapcfg_addr),
+        .swapcfg_wdata(swapcfg_wdata), .swapcfg_wstrb(swapcfg_wstrb),
+        .swapcfg_rdata(swapcfg_rdata),
+
+        .gpucfg_valid(gpucfg_valid), .gpucfg_instr(gpucfg_instr),
+        .gpucfg_ready(gpucfg_ready), .gpucfg_addr(gpucfg_addr),
+        .gpucfg_wdata(gpucfg_wdata), .gpucfg_wstrb(gpucfg_wstrb),
+        .gpucfg_rdata(gpucfg_rdata),
 
         .unmapped_valid(unmapped_valid)
     );
@@ -374,7 +400,13 @@ module rv32top #(
     // ---------------------------------------------------------------------
     // 内嵌 PSRAM
     // ---------------------------------------------------------------------
-    // GPU 端口暂时保留；HDMI DMA 独占逻辑 front die。
+    // Rectangle GPU shares logical back with the CPU; HDMI owns logical front.
+    wire gpuCmdValid;
+    wire gpuCmdWrite;
+    wire [21:0] gpuCmdAddr;
+    wire [6:0] gpuCmdWords;
+    wire [15:0] gpuWriteData;
+    wire [1:0] gpuWriteMask;
     wire gpuPsramReady;
     wire gpuPsramWtake;
     wire [15:0] gpuPsramRdata;
@@ -396,6 +428,18 @@ module rv32top #(
     wire hdmiPixelValid;
     wire hdmiPixelTake;
     wire hdmiUnderflow;
+
+    rectangleGpu gpu (
+        .clk(sysClk), .phy_clk(psramClk), .reset_n(cpuReset_n),
+        .mmio_valid(gpucfg_valid), .mmio_ready(gpucfg_ready),
+        .mmio_addr(gpucfg_addr[11:0]), .mmio_wdata(gpucfg_wdata),
+        .mmio_wstrb(gpucfg_wstrb), .mmio_rdata(gpucfg_rdata),
+        .gpu_cmd_valid(gpuCmdValid), .gpu_cmd_ready(gpuPsramReady),
+        .gpu_cmd_wr(gpuCmdWrite), .gpu_cmd_addr(gpuCmdAddr),
+        .gpu_cmd_words(gpuCmdWords), .gpu_w_data(gpuWriteData),
+        .gpu_w_mask(gpuWriteMask), .gpu_w_take(gpuPsramWtake),
+        .gpu_done(gpuPsramDone)
+    );
 
     // Each HDMI block synchronizes this request into its own clock domain.
     wire hdmiRunRequest = cpuReset_n && hdmiClockLock && hdmiEnable;
@@ -436,9 +480,14 @@ module rv32top #(
         .cfg_addr(psramcfg_addr[11:0]), .cfg_wdata(psramcfg_wdata),
         .cfg_wstrb(psramcfg_wstrb), .cfg_rdata(psramcfg_rdata),
 
-        .gpu_cmd_valid(1'b0), .gpu_cmd_ready(gpuPsramReady),
-        .gpu_cmd_wr(1'b0), .gpu_cmd_addr(22'd0), .gpu_cmd_words(7'd1),
-        .gpu_w_data(16'd0), .gpu_w_mask(2'b11),
+        .swapcfg_valid(swapcfg_valid), .swapcfg_ready(swapcfg_ready),
+        .swapcfg_addr(swapcfg_addr[11:0]), .swapcfg_wdata(swapcfg_wdata),
+        .swapcfg_wstrb(swapcfg_wstrb), .swapcfg_rdata(swapcfg_rdata),
+
+        .gpu_cmd_valid(gpuCmdValid), .gpu_cmd_ready(gpuPsramReady),
+        .gpu_cmd_wr(gpuCmdWrite), .gpu_cmd_addr(gpuCmdAddr),
+        .gpu_cmd_words(gpuCmdWords),
+        .gpu_w_data(gpuWriteData), .gpu_w_mask(gpuWriteMask),
         .gpu_w_take(gpuPsramWtake), .gpu_r_data(gpuPsramRdata),
         .gpu_r_valid(gpuPsramRvalid), .gpu_r_last(gpuPsramRlast),
         .gpu_done(gpuPsramDone),
@@ -464,12 +513,13 @@ module rv32top #(
                             pcpi_rs1, pcpi_rs2, eoi, trace_valid, trace_data,
                             flash_instr, flash_wdata, flash_wstrb, sram_instr,
                             mmio_instr, psram_instr, psramcfg_instr,
+                            swapcfg_instr, gpucfg_instr,
                             unmapped_valid, uartIdle,
                             unused_resetPressPulse,
                             unused_startDebounced_n,
-                            unused_irqDebounced_n, gpuPsramReady,
-                            gpuPsramWtake, gpuPsramRdata, gpuPsramRvalid,
-                            gpuPsramRlast, gpuPsramDone, hdmiPsramReady,
+                            unused_irqDebounced_n,
+                            gpuPsramRdata, gpuPsramRvalid,
+                            gpuPsramRlast, hdmiPsramReady,
                             hdmiPsramRdata, hdmiPsramRvalid, hdmiPsramRlast,
                             hdmiPsramDone, hdmiUnderflow};
 endmodule
