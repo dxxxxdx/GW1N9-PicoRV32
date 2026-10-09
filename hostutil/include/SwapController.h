@@ -1,9 +1,8 @@
 /*
- * PSRAM front/back role switcher.
+ * PSRAM 前后台角色交换控制器。
  *
- * HDMI exclusively reads the logical FRONT die. CPU and rectangle GPU share
- * the logical BACK die. A completed swap changes only this routing; no memory
- * is copied. Hardware drains accepted traffic before changing the mapping.
+ * HDMI 独占读取逻辑 FRONT die，CPU 和矩形 GPU 共享逻辑 BACK die。一次交换只会
+ * 改变访问路由，不复制内存内容。改变映射前，硬件会先等已经接收的事务全部结束。
  */
 #ifndef GW1NR9_RV32_SWAP_CONTROLLER_H
 #define GW1NR9_RV32_SWAP_CONTROLLER_H
@@ -11,21 +10,21 @@
 #include <stdint.h>
 
 /*
- * Swap-controller page: 0x0300_1000..0x0300_1fff.
+ * 交换控制页：0x0300_1000..0x0300_1fff。
  *
- * +0x00 MAGIC  R   Page/version signature 0x53575031 (ASCII "SWP1").
- * +0x04 STATUS R   bits [31:16] completed-swap counter (wraps at 65536)
- *                  bit 3  request level currently presented to HDMI
- *                  bit 2  physical die number currently used as BACK
- *                  bit 1  physical die number currently used as FRONT
- *                  bit 0  swap pending
- *                  bits [15:4] are zero. FRONT and BACK are complementary.
- * +0x08 CTRL   W   bit 0 queues a swap request
- *                  bit 1 injects a software frame-done event
- *                  other bits are ignored; reads return zero.
+ * +0x00 MAGIC  R   页面/版本魔数 0x53575031，即 ASCII "SWP1"。
+ * +0x04 STATUS R   [31:16] 已完成交换计数，达到 65536 后回绕
+ *                  位 3  当前送给 HDMI 的交换请求电平
+ *                  位 2  当前作为 BACK 的物理 die 编号
+ *                  位 1  当前作为 FRONT 的物理 die 编号
+ *                  位 0  有交换请求正在等待执行
+ *                  [15:4] 固定为 0；FRONT 和 BACK 的 die 编号必然互补。
+ * +0x08 CTRL   W   位 0 提交一次交换请求
+ *                  位 1 注入一次软件模拟的帧结束事件
+ *                  其他位被忽略；读该寄存器返回 0。
  *
- * CTRL writes require byte lane 0. Requests are not queued by count: another
- * bit-0 write while one swap is pending still represents the same pending swap.
+ * 写 CTRL 时必须使能最低字节通道。交换请求没有队列深度：已有交换等待执行时，
+ * 再写一次位 0 不会额外排队第二次交换。
  */
 #define SWAP_CONTROLLER_BASE       0x03001000u
 #define SWAP_CONTROLLER_MAGIC_REG  (*(volatile uint32_t *)(SWAP_CONTROLLER_BASE + 0x00u))
@@ -34,57 +33,54 @@
 
 #define SWAP_CONTROLLER_MAGIC_EXPECTED 0x53575031u /* ASCII "SWP1" */
 
-/* SWAP_CONTROLLER_STATUS_REG bits. */
-#define SWAP_STATUS_PENDING        (1u << 0) /* request accepted, not completed */
+/* SWAP_CONTROLLER_STATUS_REG 位定义。 */
+#define SWAP_STATUS_PENDING        (1u << 0) /* 请求已接收但尚未完成 */
 #define SWAP_STATUS_FRONT_DIE      (1u << 1) /* 0 = die0, 1 = die1 */
 #define SWAP_STATUS_BACK_DIE       (1u << 2) /* 0 = die0, 1 = die1 */
-#define SWAP_STATUS_HDMI_REQUEST   (1u << 3) /* same pending request sent to HDMI */
+#define SWAP_STATUS_HDMI_REQUEST   (1u << 3) /* 送给 HDMI 的同一等待请求 */
 #define SWAP_STATUS_COUNT_SHIFT    16u
 
-/* SWAP_CONTROLLER_CTRL_REG write bits. */
-#define SWAP_REQUEST               (1u << 0) /* request mapping flip */
-#define SWAP_SOFT_FRAME_DONE       (1u << 1) /* synthesize frame boundary */
+/* SWAP_CONTROLLER_CTRL_REG 写入位定义。 */
+#define SWAP_REQUEST               (1u << 0) /* 请求交换前后台映射 */
+#define SWAP_SOFT_FRAME_DONE       (1u << 1) /* 模拟一次帧边界 */
 
-/* Return the physical die number (0 or 1) currently mapped as logical BACK. */
+/* 返回当前映射为逻辑 BACK 的物理 die 编号（0 或 1）。 */
 uint32_t SwapController_GetBackDie(void);
 
-/* Return the physical die number (0 or 1) currently mapped as logical FRONT. */
+/* 返回当前映射为逻辑 FRONT 的物理 die 编号（0 或 1）。 */
 uint32_t SwapController_GetFrontDie(void);
 
-/* Return the low 16-bit completed-swap count, zero-extended to uint32_t. */
+/* 返回低 16 位已完成交换计数，并零扩展成 uint32_t。 */
 uint32_t SwapController_GetCount(void);
 
 /*
- * Queue a swap for a real HDMI frame boundary and return immediately. Once
- * that boundary arrives, CPU/HDMI traffic is held, an in-flight GPU job may
- * finish all of its bursts, and the roles flip only after both dies drain.
+ * 提交一次交换请求并立即返回。真正的 HDMI 帧边界到来后，硬件暂停接收新的 CPU
+ * 和 HDMI 事务，但允许已经开始的 GPU 作业继续发完后续突发。GPU 作业结束且两颗
+ * die 上已接收的事务全部排空后，才会原子交换 FRONT/BACK 角色。
  */
 void SwapController_Request(void);
 
 /*
- * Request a swap and inject a frame boundary in the same MMIO write. Use only
- * during boot while HDMI is disabled; it exists so software can initialize or
- * test both physical dies through the single logical BACK window.
+ * 在同一次 MMIO 写入中提交交换请求并模拟帧边界。只能在 HDMI 尚未开启的启动阶段
+ * 使用，让软件能够通过唯一的逻辑 BACK 窗口依次初始化或测试两颗物理 die。
  */
 void SwapController_BootRequest(void);
 
 /*
- * Pre-HDMI blocking swap using a synthetic frame boundary. timeout is a CPU
- * polling-iteration count. Returns 1 on completion, 0 on timeout.
- * A timeout does NOT cancel the already-issued hardware request.
+ * HDMI 开启前使用的阻塞交换，通过软件模拟帧边界触发。timeout 是 CPU 轮询次数，
+ * 不是时间单位。交换完成返回 1，超时返回 0；超时不会撤销已经发给硬件的请求。
  */
 int SwapController_SwapBeforeHDMI(uint32_t timeout);
 
 /*
- * Request a production swap at the next real HDMI frame boundary and wait for
- * its completion. timeout is a polling-iteration count, not a time unit.
- * Returns 1 on completion, 0 on timeout; timeout does not cancel the request.
+ * 请求在下一个真实 HDMI 帧边界交换并阻塞等待完成。timeout 是轮询次数，不是时间
+ * 单位。交换完成返回 1，超时返回 0；超时同样不会撤销硬件中的等待请求。
  */
 int SwapController_SwapAtHDMIFrame(uint32_t timeout);
 
 /*
- * While HDMI is disabled, make physical die (die&1) the logical BACK die.
- * Returns 1 if selected (including already selected), otherwise 0 on timeout.
+ * 在 HDMI 关闭时，把物理 die (die&1) 选为逻辑 BACK。选择成功返回 1；目标原本
+ * 已经是 BACK 也返回 1；等待交换超时则返回 0。
  */
 int SwapController_SelectBackBeforeHDMI(uint32_t die, uint32_t timeout);
 

@@ -1,12 +1,12 @@
 #include "HDMI_PSRAM.h"
 
-/* INIT_DONE is the AND of die0-ready and die1-ready inside the controller. */
+/* 控制器内部的 INIT_DONE 等于 die0-ready 与 die1-ready 的逻辑与。 */
 int HDMI_PSRAM_Ready(void)
 {
     return (HDMI_PSRAM_STATUS_REG & HDMI_PSRAM_INIT_DONE) != 0u;
 }
 
-/* Boot-time blocking helper. A board/clock failure intentionally stalls here. */
+/* 上电阶段使用的阻塞等待；如果板级连线或时钟异常，本函数会有意停在这里。 */
 uint32_t HDMI_PSRAM_WaitReady(void)
 {
     uint32_t spin = 0u;
@@ -15,13 +15,13 @@ uint32_t HDMI_PSRAM_WaitReady(void)
     return spin;
 }
 
-/* Hardware implements 16 phase taps, so only the low four bits are meaningful. */
+/* 硬件只实现 16 个相位档位，因此只有低 4 位有效。 */
 void HDMI_PSRAM_SetPhase(uint32_t phase)
 {
     HDMI_PSRAM_PHASE_REG = phase & 15u;
 }
 
-/* HDMI starts disabled after reset so software can initialize both framebuffers. */
+/* 复位后 HDMI 默认关闭，留给软件先初始化两份帧缓冲。 */
 void HDMI_PSRAM_Enable(void)
 {
     HDMI_PSRAM_CTRL_REG = HDMI_PSRAM_ENABLE;

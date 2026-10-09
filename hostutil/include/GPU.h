@@ -1,11 +1,10 @@
 /*
- * MMIO driver for the solid-rectangle GPU.
+ * 纯色矩形 GPU 的 MMIO 驱动。
  *
- * Coordinates and sizes are in pixels. The framebuffer is packed RGB565 with
- * a fixed 640-pixel (1280-byte) row stride and begins at offset zero of the
- * logical PSRAM BACK die. Hardware clips rectangles to the framebuffer, then
- * turns each row into 1..64-pixel PSRAM bursts without crossing a 128-byte
- * physical wrap group. GPU has priority over CPU at BACK-die burst boundaries.
+ * 坐标和尺寸的单位都是像素。帧缓冲采用紧密排列的 RGB565，固定每行 640 像素
+ * （1280 字节），起点是逻辑 PSRAM BACK die 的偏移 0。硬件先把矩形裁剪到画面
+ * 范围内，再把每一行转换成每次 1..64 像素的 PSRAM 写突发，并保证任何突发都
+ * 不跨越 128 字节的物理回绕边界。在 BACK die 的事务边界上，GPU 优先于 CPU。
  */
 #ifndef GW1NR9_RV32_GPU_H
 #define GW1NR9_RV32_GPU_H
@@ -13,25 +12,24 @@
 #include <stdint.h>
 
 /*
- * Rectangle-GPU page: 0x0300_f000..0x0300_ffff.
+ * 矩形 GPU 页面：0x0300_f000..0x0300_ffff。
  *
- * +0x00 MAGIC      R   Page/version signature 0x47505531 (ASCII "GPU1").
- * +0x04 STATUS     R   bits [31:16] completed-command counter (wraps at 65536)
- *                       bit 0 = busy; bits [15:1] = zero.
- * +0x08 X          R/W left edge in pixels; value is in bits [15:0].
- * +0x0c Y          R/W top edge in pixels; value is in bits [15:0].
- * +0x10 WIDTH      R/W requested width in pixels; bits [15:0].
- * +0x14 HEIGHT     R/W requested height in pixels; bits [15:0].
- * +0x18 COLOR      R/W RGB565 fill color in bits [15:0]: R[15:11],
- *                       G[10:5], B[4:0].
- * +0x1c COMMAND    W   bit 0 START snapshots all five parameter registers.
- *                       Other bits are ignored; reads return zero.
- * +0x20 FRAME_SIZE R   height in [31:16], width in [15:0] (480, 640).
+ * +0x00 MAGIC      R   页面/版本魔数 0x47505531，即 ASCII "GPU1"。
+ * +0x04 STATUS     R   [31:16] 已完成命令计数，达到 65536 后回绕
+ *                       位 0 = GPU 正忙；[15:1] 固定为 0。
+ * +0x08 X          R/W 矩形左边缘的像素坐标，有效值位于 [15:0]。
+ * +0x0c Y          R/W 矩形上边缘的像素坐标，有效值位于 [15:0]。
+ * +0x10 WIDTH      R/W 请求绘制的宽度，单位像素，有效值位于 [15:0]。
+ * +0x14 HEIGHT     R/W 请求绘制的高度，单位像素，有效值位于 [15:0]。
+ * +0x18 COLOR      R/W RGB565 填充颜色，位于 [15:0]：R[15:11]、
+ *                       G[10:5]、B[4:0]。
+ * +0x1c COMMAND    W   位 0 START：锁存上述五个参数并启动一次绘制。
+ *                       其他位被忽略；读该寄存器返回 0。
+ * +0x20 FRAME_SIZE R   [31:16] 为画面高度，[15:0] 为宽度，即 480、640。
  *
- * Parameter writes use the low 16 bits. If BUSY=1, ALL parameter and START
- * writes are acknowledged but discarded; there is no command queue. X/Y past
- * the right/bottom edge, or a zero/clipped-to-zero size, performs no PSRAM
- * write but still completes and increments the completion counter.
+ * 参数寄存器只使用低 16 位。BUSY=1 时，所有参数写入和 START 写入都会正常应答，
+ * 但实际被丢弃；硬件没有命令队列。X/Y 已在画面右侧/下方，或者宽高为 0、裁剪后
+ * 变成 0 时，不会发出 PSRAM 写事务，但该命令仍会完成并增加完成计数。
  */
 #define GPU_MMIO_BASE       0x0300f000u
 #define GPU_MAGIC_REG       (*(volatile uint32_t *)(GPU_MMIO_BASE + 0x00u))
@@ -49,29 +47,28 @@
 #define GPU_STATUS_COUNT_SHIFT    16u
 #define GPU_COMMAND_START         (1u << 0)
 
-/* Return nonzero from START acceptance until every rectangle burst is done. */
+/* 从 START 被接收到矩形最后一个突发完成之前返回非零。 */
 int GPU_IsBusy(void);
 
-/* Return the low 16-bit completed-command counter, zero-extended to uint32_t. */
+/* 返回低 16 位已完成命令计数，并零扩展成 uint32_t。 */
 uint32_t GPU_GetCompletionCount(void);
 
-/* Busy-wait with no timeout until the current rectangle command completes. */
+/* 无超时忙等，直到当前矩形命令完全结束。 */
 void GPU_WaitIdle(void);
 
 /*
- * If idle, program one rectangle and issue START, then return 1 immediately.
- * Return 0 without changing any register if the GPU was already busy.
+ * GPU 空闲时写入一个矩形的全部参数，发出 START 后立即返回 1。如果调用时 GPU
+ * 已经忙，则不修改任何参数寄存器并返回 0。
  *
- * This function serializes five parameter writes followed by START. Do not
- * call it concurrently from main code and an interrupt handler. Arguments are
- * truncated to 16 bits by hardware; the rectangle is then clipped to 640x480.
+ * 本函数依次进行五次参数写入，最后再写 START。因此不能同时从主程序和中断处理
+ * 函数调用。硬件先把各参数截断为 16 位，再将矩形裁剪到 640x480 画面范围内。
  */
 int GPU_FillRectangleAsync(uint32_t x, uint32_t y, uint32_t width,
                            uint32_t height, uint16_t color);
 
 /*
- * Blocking rectangle fill: wait for an older command, submit this rectangle,
- * and wait until all of its PSRAM bursts finish. There is no timeout.
+ * 阻塞式矩形填充：先等待上一条命令结束，再提交本次矩形，最后等待它的全部
+ * PSRAM 突发完成。本函数没有超时机制。
  */
 void GPU_FillRectangle(uint32_t x, uint32_t y, uint32_t width,
                        uint32_t height, uint16_t color);

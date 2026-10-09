@@ -1,6 +1,6 @@
 #include "SwapController.h"
 
-/* STATUS stores the physical die number directly in each role bit. */
+/* STATUS 的 FRONT/BACK 位直接保存对应的物理 die 编号。 */
 uint32_t SwapController_GetBackDie(void)
 {
     return (SWAP_CONTROLLER_STATUS_REG & SWAP_STATUS_BACK_DIE) != 0u;
@@ -16,19 +16,19 @@ uint32_t SwapController_GetCount(void)
     return SWAP_CONTROLLER_STATUS_REG >> SWAP_STATUS_COUNT_SHIFT;
 }
 
-/* Bit 0 becomes a pulse in the 80 MHz PSRAM clock domain. */
+/* 位 0 经跨时钟同步后，在 80 MHz PSRAM 时钟域中变成一个请求脉冲。 */
 void SwapController_Request(void)
 {
     SWAP_CONTROLLER_CTRL_REG = SWAP_REQUEST;
 }
 
-/* One write generates both request and synthetic frame-done pulses. */
+/* 一次写入同时产生交换请求脉冲和软件模拟的帧结束脉冲。 */
 void SwapController_BootRequest(void)
 {
     SWAP_CONTROLLER_CTRL_REG = SWAP_REQUEST | SWAP_SOFT_FRAME_DONE;
 }
 
-/* A count change is the software-visible commit point of the mapping flip. */
+/* 交换计数发生变化，就是软件可见的“映射已经正式切换”提交点。 */
 static int wait_for_swap(uint32_t before, uint32_t timeout)
 {
     for (uint32_t i = 0u; i < timeout; ++i)
