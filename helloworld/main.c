@@ -196,11 +196,6 @@ int main(void)
     UART_UInt(SwapController_GetBackDie());
     UART_CStr("\r\n");
 
-    print_result("logical bytes", HDMI_PSRAM_BYTES_REG, HDMI_PSRAM_SIZE);
-    print_result("physical bytes", HDMI_PSRAM_PHYS_BYTES_REG,
-                 HDMI_PSRAM_PHYSICAL_SIZE);
-    print_result("fixed phase", HDMI_PSRAM_PHASE_REG, 5u);
-
     UART_CStr("render both 640x480 RGB565 framebuffers...\r\n");
     if (!SwapController_SelectBackBeforeHDMI(0u, SWAP_TIMEOUT)) {
         UART_CStr("HDMI init failed: cannot select die0\r\n");

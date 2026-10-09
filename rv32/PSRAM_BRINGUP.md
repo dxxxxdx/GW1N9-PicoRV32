@@ -27,7 +27,7 @@ A swap changes only these two ownership bits.  It does not copy memory.
 
 - CPU, MMIO and normal bus: 40 MHz
 - two PSRAM PHYs: 80 MHz
-- PSRAM CK: 80 MHz with dynamic rPLL phase hardware
+- PSRAM CK: 80 MHz with static rPLL phase tap 5
 - startup phase: fixed tap 5, the measured common pass-window center (2..7)
 - CR0: `0x9FEC`, 128-byte burst, latency 3, fixed 2x latency, 35-ohm drive
 - power-up: each PHY waits 160 us and configures its own die
@@ -81,14 +81,12 @@ HDMI/PSRAM status is at `0x0300_0000`:
 
 | Offset | Access | Description |
 |---:|---|---|
-| `0x00` | R | PHY frequency, `80_000_000` |
 | `0x04` | R | init/busy/die-ready/GPU/HDMI status |
-| `0x08` | R/W | rPLL phase tap, reset value 5 |
 | `0x0c` | R | magic `0x48505331` (`HPS1`) |
-| `0x10` | R | phase-clock activity counter |
-| `0x14` | R | CPU-visible logical bytes, `0x0040_0000` |
-| `0x18` | R | total physical bytes, `0x0080_0000` |
 | `0x1c` | R/W | HDMI enable, bit 0 |
+
+All other offsets read as zero. The PSRAM CK phase is fixed in the PLL and is
+not software writable.
 
 Swap control is isolated at `0x0300_1000`:
 
@@ -122,8 +120,9 @@ START while busy are acknowledged and discarded rather than queued.
 
 ## Firmware startup
 
-The current firmware writes the characterized phase tap 5 from `start.S` and
-does not run destructive lane, full-memory, or swap-stress tests. The GPU draws
+The PLL statically uses characterized phase tap 5; `start.S` only waits for
+both PHYs to finish initialization. Firmware does not run destructive lane,
+full-memory, or swap-stress tests. The GPU draws
 the two color-bar framebuffers, uses one software-injected frame boundary to reach
 the other physical die before HDMI starts, then enables normal HDMI-driven
 front/back swaps.

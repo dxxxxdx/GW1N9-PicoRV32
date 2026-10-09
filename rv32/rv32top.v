@@ -49,20 +49,18 @@ module rv32top #(
     output wire        trap
 );
     // ---------------------------------------------------------------- 时钟
-    // 50MHz -> 80MHz PHY + 80MHz动态相移 PSRAM CK + 40MHz CPU
+    // 50MHz -> 80MHz PHY + 固定相位档位5的80MHz PSRAM CK + 40MHz CPU
     wire       sysClk;
     wire       psramClk;
     wire       psramClkP;
     wire       pllLock;
-    wire [3:0] psramCkPhase;   // 上电为5，固件可训练后驱动rPLL动态相位
 
     Gowin_rPLL sysPll (
         .clkout  (psramClk),
         .clkoutp (psramClkP),
         .clkoutd (sysClk),
         .lock    (pllLock),
-        .clkin   (clock50MHz),
-        .psda    (psramCkPhase)
+        .clkin   (clock50MHz)
     );
 
     // Tang Nano reference HDMI mode: 126.6667 MHz serializer clock and
@@ -502,8 +500,6 @@ module rv32top #(
         .hdmi_frame_done(hdmiFrameDone),
         .frame_swap_request(frameSwapRequest),
         .hdmi_enable(hdmiEnable),
-
-        .ckPhase(psramCkPhase),
 
         .O_psram_ck(O_psram_ck), .O_psram_ck_n(O_psram_ck_n),
         .O_psram_cs_n(O_psram_cs_n), .O_psram_reset_n(O_psram_reset_n),

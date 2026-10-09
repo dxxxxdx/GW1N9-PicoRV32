@@ -30,8 +30,8 @@ UART RX -> 裸字节程序加载器 -> 16 KiB 程序 BSRAM
 ```
 
 第一颗 rPLL 将 50 MHz 板载晶振变成 40 MHz CPU/总线时钟、80 MHz PSRAM
-PHY 时钟以及可动态调相的 80 MHz PSRAM CK。当前实测相位通过窗口为 2..7，
-启动汇编固定写入窗口中点 5，不再运行软件扫相训练。第二颗 rPLL 从 40 MHz 产生 126.667 MHz TMDS 串行时钟，
+PHY 时钟以及固定相位的 80 MHz PSRAM CK。当前实测相位通过窗口为 2..7，
+PLL 直接固化窗口中点 5，不再提供软件调相或扫相训练。第二颗 rPLL 从 40 MHz 产生 126.667 MHz TMDS 串行时钟，
 再经 `/5` 得到 25.333 MHz 像素时钟；640x480、800x525 总时序约为 60.3 Hz。
 
 ## 目录
@@ -132,7 +132,7 @@ create_clock -name clock50MHz -period 20.000 \
 | `0x0000_4000`–`0x0000_7fff` | 16 KiB | 数据 BSRAM |
 | `0x0100_0000`–`0x0100_ffff` | 64 KiB | MMIO 窗口 |
 | `0x0200_0000`–`0x023f_ffff` | 4 MiB | 当前后台 die 的逻辑 PSRAM 窗口 |
-| `0x0300_0000`–`0x0300_0fff` | 4 KiB | HDMI/PSRAM 状态、相位和 HDMI 使能 |
+| `0x0300_0000`–`0x0300_0fff` | 4 KiB | HDMI/PSRAM 状态、魔数和 HDMI 使能 |
 | `0x0300_1000`–`0x0300_1fff` | 4 KiB | front/back SwapController |
 | `0x0300_f000`–`0x0300_ffff` | 4 KiB | 矩形 GPU MMIO |
 

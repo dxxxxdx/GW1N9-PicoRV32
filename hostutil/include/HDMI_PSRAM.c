@@ -15,12 +15,6 @@ uint32_t HDMI_PSRAM_WaitReady(void)
     return spin;
 }
 
-/* 硬件只实现 16 个相位档位，因此只有低 4 位有效。 */
-void HDMI_PSRAM_SetPhase(uint32_t phase)
-{
-    HDMI_PSRAM_PHASE_REG = phase & 15u;
-}
-
 /* 复位后 HDMI 默认关闭，留给软件先初始化两份帧缓冲。 */
 void HDMI_PSRAM_Enable(void)
 {

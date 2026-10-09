@@ -20,10 +20,9 @@
 #define HDMI_HEIGHT                480u
 #define HDMI_FRAME_BYTES           (HDMI_WIDTH * HDMI_HEIGHT * 2u)
 
-/* CPU 可见的逻辑 BACK 窗口，以及两颗物理 die 的总容量。 */
+/* CPU 可见的逻辑 BACK 窗口。 */
 #define HDMI_PSRAM_BASE            0x02000000u
 #define HDMI_PSRAM_SIZE            0x00400000u
-#define HDMI_PSRAM_PHYSICAL_SIZE   0x00800000u
 
 /*
  * 把对象放入链接脚本的 .psram NOLOAD 段。NOLOAD 表示下载镜像和复位代码都不会
@@ -46,28 +45,17 @@ extern uint8_t __psram_end[];    /* .psram 对象区末尾的下一字节 */
 /*
  * HDMI/PSRAM 配置页：0x0300_0000..0x0300_0fff。
  *
- * +0x00 INFO       R   PHY 时钟频率，单位 Hz；当前为 80,000,000。
  * +0x04 STATUS     R   同步到 CPU 时钟域的实时状态；各位定义见下方。
- * +0x08 PHASE      R/W PSRAM CK 的 rPLL 相位档位，位于 [3:0]，复位值为 5。
- *                       写入后立即改变相位，不会自动重新训练或校验内存；
- *                       只有写入值的低 4 位会被保留。
  * +0x0c MAGIC      R   页面/版本魔数 0x48505331，即 ASCII "HPS1"。
- * +0x10 CKPCNT     R   自由运行的 clk_p 计数器 [31:16] 的同步采样值。
- *                       只用于确认相位时钟仍在运行，不能当精确定时器使用。
- * +0x14 BYTES      R   CPU 可见的逻辑 BACK 容量，固定为 0x0040_0000。
- * +0x18 PHYS_BYTES R   两颗物理 die 的总容量，固定为 0x0080_0000。
  * +0x1c CTRL       R/W 位 0 控制 HDMI 取帧/输出；复位值为 0（关闭）。
  *
- * 所有寄存器均为 32 位。写 PHASE 和 CTRL 时必须使能最低字节通道。
+ * 原 +0x00、+0x08、+0x10、+0x14、+0x18 槽位保留并读回 0。所有寄存器均为
+ * 32 位；写 CTRL 时必须使能最低字节通道。PSRAM CK 相位已经在 PLL 中固定为
+ * 实测稳定的档位 5，不再提供软件配置寄存器。
  */
 #define HDMI_PSRAM_CFG_BASE        0x03000000u
-#define HDMI_PSRAM_INFO_REG        (*(volatile uint32_t *)(HDMI_PSRAM_CFG_BASE + 0x00u))
 #define HDMI_PSRAM_STATUS_REG      (*(volatile uint32_t *)(HDMI_PSRAM_CFG_BASE + 0x04u))
-#define HDMI_PSRAM_PHASE_REG       (*(volatile uint32_t *)(HDMI_PSRAM_CFG_BASE + 0x08u))
 #define HDMI_PSRAM_MAGIC_REG       (*(volatile uint32_t *)(HDMI_PSRAM_CFG_BASE + 0x0cu))
-#define HDMI_PSRAM_CKPCNT_REG      (*(volatile uint32_t *)(HDMI_PSRAM_CFG_BASE + 0x10u))
-#define HDMI_PSRAM_BYTES_REG       (*(volatile uint32_t *)(HDMI_PSRAM_CFG_BASE + 0x14u))
-#define HDMI_PSRAM_PHYS_BYTES_REG  (*(volatile uint32_t *)(HDMI_PSRAM_CFG_BASE + 0x18u))
 #define HDMI_PSRAM_CTRL_REG        (*(volatile uint32_t *)(HDMI_PSRAM_CFG_BASE + 0x1cu))
 
 #define HDMI_PSRAM_MAGIC_EXPECTED  0x48505331u /* ASCII "HPS1" */
@@ -91,12 +79,6 @@ int HDMI_PSRAM_Ready(void);
  * 返回值只是循环次数，不是微秒数。
  */
 uint32_t HDMI_PSRAM_WaitReady(void);
-
-/*
- * 立即选择 rPLL 相位档位 phase&15。这是底层调试接口；正常固件使用已经实测稳定的
- * 档位 5，不应在 PSRAM 工作期间随意修改。
- */
-void HDMI_PSRAM_SetPhase(uint32_t phase);
 
 /* 开启 HDMI 帧缓冲读取；调用前应先初始化两颗物理 die 上的帧缓冲。 */
 void HDMI_PSRAM_Enable(void);

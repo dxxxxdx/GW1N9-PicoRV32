@@ -146,7 +146,6 @@ module tb_psramController;
     wire frame_swap_request;
     wire hdmi_enable;
 
-    wire [3:0] phase;
     wire [1:0] ck, ck_n, cs_n, psreset_n;
     wire [1:0] rwds;
     wire [15:0] dq;
@@ -174,7 +173,7 @@ module tb_psramController;
         .hdmi_done(hdmi_done), .hdmi_frame_done(hdmi_frame_done),
         .frame_swap_request(frame_swap_request),
         .hdmi_enable(hdmi_enable),
-        .ckPhase(phase), .O_psram_ck(ck), .O_psram_ck_n(ck_n),
+        .O_psram_ck(ck), .O_psram_ck_n(ck_n),
         .O_psram_cs_n(cs_n), .O_psram_reset_n(psreset_n),
         .IO_psram_rwds(rwds), .IO_psram_dq(dq)
     );
@@ -277,9 +276,6 @@ module tb_psramController;
         reset_n = 1'b1;
         wait (dut.initDoneCpu);
         repeat (3) @(negedge clk);
-
-        if (phase !== 4'd5)
-            $fatal(1, "phase did not reset to fixed tap 5");
 
         // Exercise both registered switcher/PHY command pipes at once.  GPU
         // owns logical back (die 0 at reset) while HDMI owns front (die 1).
@@ -384,15 +380,15 @@ module tb_psramController;
         swapcfg_read(12'h004, 32'h0002_0002); // front=1, back=0
         swapcfg_read(12'h000, 32'h5357_5031);
 
-        cfg_read(12'h000, 32'd80_000_000);
-        cfg_read(12'h008, 32'd5);
+        // Removed diagnostics and fixed constants read as zero.  The magic is
+        // deliberately retained so firmware can reject a mismatched bitstream.
+        cfg_read(12'h000, 32'd0);
         cfg_write(12'h008, 32'd11);
-        cfg_read(12'h008, 32'd11);
-        if (phase !== 4'd11)
-            $fatal(1, "dynamic phase write failed");
+        cfg_read(12'h008, 32'd0);
         cfg_read(12'h00c, 32'h4850_5331);
-        cfg_read(12'h014, 32'h0040_0000);
-        cfg_read(12'h018, 32'h0080_0000);
+        cfg_read(12'h010, 32'd0);
+        cfg_read(12'h014, 32'd0);
+        cfg_read(12'h018, 32'd0);
         cfg_read(12'h01c, 32'd0);
         cfg_write(12'h01c, 32'd1);
         cfg_read(12'h01c, 32'd1);

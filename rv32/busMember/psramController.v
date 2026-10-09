@@ -77,8 +77,6 @@ module psramController #(
     output wire        frame_swap_request,
     output reg         hdmi_enable,
 
-    output wire [3:0]  ckPhase,
-
     output wire [1:0]  O_psram_ck,
     output wire [1:0]  O_psram_ck_n,
     output wire [1:0]  O_psram_cs_n,
@@ -94,10 +92,6 @@ module psramController #(
                      P_IDLE      = 3'd1,
                      P_CMD       = 3'd2,
                      P_WAIT      = 3'd3;
-
-    // Phase 5 is the center selected from the measured common pass window 2..7.
-    reg [3:0] ckPhaseR = 4'd5;
-    assign ckPhase = ckPhaseR;
 
     // ---------------------------------------------------------------- CPU side
     reg [1:0]  cpuState;
@@ -493,50 +487,25 @@ module psramController #(
         end
     end
 
-    // Count phase-clock edges for a board-level clock-alive diagnostic.
-    reg [31:0] ckpCnt = 32'd0;
-    reg [15:0] ckpCntMeta;
-    reg [15:0] ckpCntSync;
-    always @(posedge clk_p)
-        ckpCnt <= ckpCnt + 32'd1;
-    always @(posedge clk) begin
-        if (!reset_n) begin
-            ckpCntMeta <= 16'd0;
-            ckpCntSync <= 16'd0;
-        end else begin
-            ckpCntMeta <= ckpCnt[31:16];
-            ckpCntSync <= ckpCntMeta;
-        end
-    end
-
     // ------------------------------------------------------ HDMI/PSRAM MMIO
     always @(posedge clk) begin
         if (!reset_n) begin
             cfg_ready   <= 1'b0;
-            ckPhaseR    <= 4'd5;
             hdmi_enable <= 1'b0;
         end else begin
             cfg_ready <= cfg_valid;
-            if (cfg_valid && !cfg_ready && cfg_wstrb[0]) begin
-                if (cfg_addr[5:2] == 4'd2)
-                    ckPhaseR <= cfg_wdata[3:0];
-                if (cfg_addr[5:2] == 4'd7)
-                    hdmi_enable <= cfg_wdata[0];
-            end
+            if (cfg_valid && !cfg_ready && cfg_wstrb[0] &&
+                cfg_addr[5:2] == 4'd7)
+                hdmi_enable <= cfg_wdata[0];
         end
     end
 
     always @* begin
         case (cfg_addr[5:2])
-            4'd0: cfg_rdata = PHY_FREQ_HZ;
             4'd1: cfg_rdata = {26'd0, hdmiSyncCpu, gpuSyncCpu,
                                init1SyncCpu, init0SyncCpu,
                                busySyncCpu, initDoneCpu};
-            4'd2: cfg_rdata = {28'd0, ckPhaseR};
             4'd3: cfg_rdata = 32'h4850_5331; // "HPS1": HDMI/PSRAM page v1
-            4'd4: cfg_rdata = {16'd0, ckpCntSync};
-            4'd5: cfg_rdata = 32'h0040_0000; // CPU-visible logical back bytes
-            4'd6: cfg_rdata = 32'h0080_0000; // total physical PSRAM bytes
             4'd7: cfg_rdata = {31'd0, hdmi_enable};
             default: cfg_rdata = 32'd0;
         endcase

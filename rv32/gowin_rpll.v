@@ -18,7 +18,7 @@
 //   fCLKOUTD = fCLKOUT / 2 = 40MHz（CPU / 总线）
 //
 // clkoutp 是给 PSRAM 送 CK 用的相移时钟。PSDA 每级为 22.5 度；当前实测
-// 通过窗口是 2..7，默认取中点 PSDA = 5（112.5 度）：
+// 通过窗口是 2..7，固定取中点 PSDA = 5（112.5 度）：
 // PSRAM 在 CK 沿上收发数据，FPGA 用自己的时钟采样，CK 必须相对 fabric 时钟
 // 落在合适的数据眼位置。rdLat 只能按整拍挪，不能替代这个拍内相位调整。
 // 这个值抄的是能跑通的 1:1 开源设计（dominicbeesley/psram-tang-nano-9k）。
@@ -27,25 +27,18 @@
 
 module Gowin_rPLL (
     output clkout,      // 80MHz -> PSRAM PHY
-    output clkoutp,     // 80MHz动态相移 -> PSRAM CK
+    output clkoutp,     // 80MHz固定相位档位5 -> PSRAM CK
     output clkoutd,     // 40MHz -> CPU / 总线
     output lock,
-    input  clkin,       // 50MHz 晶振
-    input  [3:0] psda   // 动态相位：每级 22.5 度，固件训练后选窗口中心
+    input  clkin        // 50MHz 晶振
 );
 
 wire clkoutd3_o;
 wire gw_vcc;
 wire gw_gnd;
-wire [3:0] dutyda;
 
 assign gw_vcc = 1'b1;
 assign gw_gnd = 1'b0;
-// With DYN_DA_EN enabled DUTYDA is the falling-edge position, not a standalone
-// duty-cycle value.  Keeping it eight taps after PSDA preserves a 50% clock at
-// every phase (the addition deliberately wraps modulo 16).
-assign dutyda = psda + 4'd8;
-
 rPLL rpll_inst (
     .CLKOUT     (clkout),
     .LOCK       (lock),
@@ -59,8 +52,8 @@ rPLL rpll_inst (
     .FBDSEL     ({gw_gnd, gw_gnd, gw_gnd, gw_gnd, gw_gnd, gw_gnd}),
     .IDSEL      ({gw_gnd, gw_gnd, gw_gnd, gw_gnd, gw_gnd, gw_gnd}),
     .ODSEL      ({gw_gnd, gw_gnd, gw_gnd, gw_gnd, gw_gnd, gw_gnd}),
-    .PSDA       (psda),
-    .DUTYDA     (dutyda),
+    .PSDA       ({gw_gnd, gw_gnd, gw_gnd, gw_gnd}),
+    .DUTYDA     ({gw_gnd, gw_gnd, gw_gnd, gw_gnd}),
     .FDLY       ({gw_vcc, gw_vcc, gw_vcc, gw_vcc})
 );
 
@@ -71,9 +64,9 @@ defparam rpll_inst.DYN_FBDIV_SEL    = "false";
 defparam rpll_inst.FBDIV_SEL        = 7;        // FBDIV = 8 -> 50*8/5 = 80MHz
 defparam rpll_inst.DYN_ODIV_SEL     = "false";
 defparam rpll_inst.ODIV_SEL         = 8;        // fVCO = 640MHz
-defparam rpll_inst.PSDA_SEL         = "0101";   // static fallback: measured center tap 5
-defparam rpll_inst.DYN_DA_EN        = "true";
-defparam rpll_inst.DUTYDA_SEL       = "1101";   // static fallback: PSDA+8
+defparam rpll_inst.PSDA_SEL         = "0101";   // 实测通过窗口2..7的中点5
+defparam rpll_inst.DYN_DA_EN        = "false";
+defparam rpll_inst.DUTYDA_SEL       = "1101";   // PSDA+8，保持50%占空比
 defparam rpll_inst.CLKOUT_FT_DIR    = 1'b1;
 defparam rpll_inst.CLKOUTP_FT_DIR   = 1'b1;
 defparam rpll_inst.CLKOUT_DLY_STEP  = 0;
