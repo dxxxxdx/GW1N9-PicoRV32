@@ -1,9 +1,9 @@
 `timescale 1ns / 1ps
 `default_nettype none
 
-// MMIO-programmed solid-rectangle engine for the logical PSRAM back buffer.
-// The CPU clock domain snapshots one command; the 80 MHz PHY domain clips it
-// to the 640x480 RGB565 framebuffer and emits 1..64-pixel write bursts.
+// MMIO 控制的纯色矩形 GPU，目标是逻辑 PSRAM BACK 帧缓冲。
+// CPU 时钟域锁存一条命令，80 MHz PHY 时钟域完成裁剪、地址生成和突发拆分。
+// GPU 没有像素 FIFO：颜色在整个作业中保持不变，直接重复送给每个写 beat。
 module rectangleGpu #(
     parameter integer FRAME_WIDTH = 640,
     parameter integer FRAME_HEIGHT = 480,
@@ -52,8 +52,8 @@ module rectangleGpu #(
     reg [15:0] completionCount;
     reg        doneMeta, doneSync, doneSeen;
 
-    // The job registers are held unchanged from start until completion.  This
-    // is a bundled-data CDC: the request toggle takes two PHY clocks to cross.
+    // START 时把参数复制到 job*，作业结束前保持不变。requestToggle 经过两级
+    // 同步进入 PHY 域，因此 job* 可以作为随请求一起跨域的稳定数据包。
     always @(posedge clk) begin
         mmio_ready <= mmio_valid;
         doneMeta <= doneTogglePhy;
@@ -84,9 +84,8 @@ module rectangleGpu #(
                 completionCount <= completionCount + 16'd1;
             end
 
-            // Busy commands are deliberately non-queued: acknowledge the
-            // MMIO access, but discard every parameter/START write.  Software
-            // must observe idle before programming the next complete command.
+            // GPU 没有命令队列。busy 时总线仍正常应答，但参数和 START 写入被丢弃；
+            // 软件必须等 idle 后再完整写下一组参数。
             if (mmio_valid && !mmio_ready && |mmio_wstrb && !cpuBusy) begin
                 case (mmio_addr[5:2])
                     4'd2: if (mmio_wstrb[0] || mmio_wstrb[1])
@@ -151,13 +150,11 @@ module rectangleGpu #(
     reg [21:0] nextAddr;
     wire [21:0] jobXExt = {6'd0, xPhy};
     wire [21:0] jobYExt = {6'd0, yPhy};
-    // 640 RGB565 pixels = 1280 bytes = 1024 + 256, so no multiplier is needed.
+    // 一行 640 个 RGB565 像素 = 1280 字节 = 1024 + 256，用移位加法算行地址。
     wire [21:0] jobStartAddr = (jobYExt << 10) + (jobYExt << 8) +
                                 (jobXExt << 1);
-    // Although CA requests a linear transaction, the embedded PSRAM is most
-    // robust when no command crosses its configured 128-byte wrap group.
-    // An arbitrary rectangle X can start inside such a group, so shorten the
-    // first burst to the boundary and use full 64-word bursts only afterwards.
+    // PSRAM 已配置为 128 字节回绕。矩形可以从任意 X 开始，因此第一笔突发可能
+    // 不满 64 像素；先截到下一个 128 字节边界，后续再发完整 64 像素突发。
     wire [6:0] wordsTo128Boundary =
         7'd64 - {1'b0, currentAddr[6:1]};
     wire [6:0] wordsLimitedByLength =
@@ -168,6 +165,7 @@ module rectangleGpu #(
         wordsTo128Boundary : wordsLimitedByLength;
 
     assign gpu_cmd_wr = 1'b1;
+    // 纯色填充不需要 FIFO：每个写 beat 都直接重复输出同一个 colorPhy。
     assign gpu_w_data = colorPhy;
     assign gpu_w_mask = 2'b00;
 
@@ -226,6 +224,7 @@ module rectangleGpu #(
             case (gpuState)
                 G_IDLE: begin
                     gpu_cmd_valid <= 1'b0;
+                    // requestToggle 翻转表示 CPU 提交了一条新命令。
                     if (reqSyncPhy != reqSeenPhy) begin
                         reqSeenPhy <= reqSyncPhy;
                         xPhy <= jobXSyncPhy;
@@ -239,6 +238,7 @@ module rectangleGpu #(
                 end
 
                 G_CAPTURE: begin
+                    // 计算首像素字节地址，以及 X/Y 方向还能容纳多少像素。
                     rowStart    <= jobStartAddr;
                     currentAddr <= jobStartAddr;
                     xAvailable <= xPhy >= FRAME_WIDTH_U16 ? 10'd0 :
@@ -249,18 +249,21 @@ module rectangleGpu #(
                 end
 
                 G_COMPARE: begin
+                    // 比较结果先寄存一拍，缩短 80 MHz 组合路径。
                     widthNeedsClip <= widthPhy > {6'd0, xAvailable};
                     heightNeedsClip <= heightPhy > {7'd0, yAvailable};
                     gpuState <= G_CLIP;
                 end
 
                 G_CLIP: begin
+                    // 得到实际绘制的每行像素数和总行数。
                     rowWords <= widthNeedsClip ? xAvailable : widthPhy[9:0];
                     rowsLeft <= heightNeedsClip ? yAvailable : heightPhy[8:0];
                     gpuState    <= G_VALIDATE;
                 end
 
                 G_VALIDATE: begin
+                    // 空矩形也算正常完成，但不会发任何 PSRAM 事务。
                     if (rowWords == 10'd0 || rowsLeft == 9'd0) begin
                         doneTogglePhy <= ~doneTogglePhy;
                         gpu_job_busy <= 1'b0;
@@ -272,6 +275,7 @@ module rectangleGpu #(
                 end
 
                 G_PREP: begin
+                    // 生成下一笔 1..64 像素、且不跨 128 字节边界的写突发。
                     gpu_cmd_addr  <= currentAddr;
                     gpu_cmd_words <= nextBurstWords;
                     gpu_cmd_valid <= 1'b1;
@@ -279,6 +283,7 @@ module rectangleGpu #(
                 end
 
                 G_ISSUE: begin
+                    // switcher 接收命令后才推进剩余长度和下一地址。
                     if (gpu_cmd_valid && gpu_cmd_ready) begin
                         remainingWords <= wordsLeft -
                                           {3'd0, gpu_cmd_words};
@@ -290,6 +295,7 @@ module rectangleGpu #(
                 end
 
                 G_WAIT: begin
+                    // 一笔物理突发真正结束后，继续本行、下一行或结束作业。
                     if (gpu_done) begin
                         if (remainingWords != 10'd0) begin
                             currentAddr <= nextAddr;
@@ -317,6 +323,7 @@ module rectangleGpu #(
         end
     end
 
+    // 写数据是常量，不需要用 w_take 推进 FIFO/数据指针。
     wire unusedWtake = gpu_w_take;
 endmodule
 

@@ -1,7 +1,8 @@
 `timescale 1ns / 1ps
 `default_nettype none
 
-// Front-die RGB565 DMA and one-BSRAM asynchronous pixel FIFO.
+// 从 FRONT die 读取 RGB565 像素的 DMA，以及一块 BSRAM 实现的异步像素 FIFO。
+// 写侧运行在 80 MHz PSRAM 域，读侧运行在 25.33 MHz HDMI 像素域。
 module psramHdmiReader #(
     parameter integer H_ACTIVE = 640,
     parameter integer V_ACTIVE = 480,
@@ -32,10 +33,8 @@ module psramHdmiReader #(
     localparam integer FRAME_WORDS = H_ACTIVE * V_ACTIVE;
     localparam integer FREE_MARGIN = 8;
 
-    // HDMI enable is written in the CPU clock domain.  Turn it into local,
-    // synchronously released run signals before it reaches either side of the
-    // asynchronous FIFO.  Synchronous assertion also avoids treating the MMIO
-    // bit as an asynchronous reset tree during timing analysis.
+    // HDMI enable 来自 CPU 时钟域。分别同步到 FIFO 两侧后再释放本地逻辑，避免
+    // 把 MMIO 位直接当成跨全芯片的异步复位信号。
     reg [2:0] phyRunPipe = 3'b000;
     reg [2:0] pixelRunPipe = 3'b000;
     always @(posedge phy_clk)
@@ -49,6 +48,7 @@ module psramHdmiReader #(
     reg lastBurst;
     reg waitForSwap;
     reg [21:0] nextAddr;
+    // 已“发出命令”的像素数，不是已经进入 FIFO 的像素数。
     reg [18:0] wordsScheduled;
     wire [19:0] wordsRemaining = FRAME_WORDS - wordsScheduled;
     wire [6:0] nextWords = wordsRemaining < BURST_WORDS ?
@@ -56,7 +56,9 @@ module psramHdmiReader #(
 
     wire [FIFO_ABITS-1:0] fifoFree;
     wire [FIFO_ABITS-1:0] fifoAvail;
+    // PSRAM 读数据不能反压，r_valid 来一个就必须写进 FIFO。
     wire fifoWrite = r_valid;
+    // 发命令前预留完整 64 像素突发，再留 8 格跨域计数余量。
     wire canLaunch = fifoFree >= BURST_WORDS + FREE_MARGIN;
 
     psramHdmiAsyncFifo #(
@@ -68,6 +70,7 @@ module psramHdmiReader #(
         .read_enable(pixel_take), .read_data(pixel_data),
         .read_available(fifoAvail)
     );
+    // 像素域只看本地可读计数；非零才允许 HDMI 取走一个像素。
     assign pixel_valid = fifoAvail != {FIFO_ABITS{1'b0}};
 
     always @(posedge phy_clk) begin
@@ -83,6 +86,7 @@ module psramHdmiReader #(
             wordsScheduled <= 19'd0;
         end else begin
             if (cmd_valid && cmd_ready) begin
+                // switcher 接收突发后，提前推进本帧的调度地址和像素数。
                 cmd_valid <= 1'b0;
                 activeBurst <= 1'b1;
                 lastBurst <= wordsScheduled + cmd_words >= FRAME_WORDS;
@@ -93,10 +97,12 @@ module psramHdmiReader #(
             if (activeBurst && cmd_done) begin
                 activeBurst <= 1'b0;
                 if (lastBurst) begin
+                    // 最后一笔 FRONT 读突发结束就是本模块的帧边界。
                     frame_done <= 1'b1;
                     wordsScheduled <= 19'd0;
                     nextAddr <= 22'd0;
                     if (frame_swap_request)
+                        // 有交换请求时先停发下一帧，等 switcher 完成映射翻转。
                         waitForSwap <= 1'b1;
                 end
             end
@@ -105,6 +111,7 @@ module psramHdmiReader #(
                 waitForSwap <= 1'b0;
 
             if (!cmd_valid && !activeBurst && !waitForSwap && canLaunch) begin
+                // 同一时刻只保留一笔在途读突发，FIFO 空间够才启动。
                 cmd_valid <= 1'b1;
                 cmd_addr <= nextAddr;
                 cmd_words <= nextWords;
@@ -131,10 +138,12 @@ module psramHdmiAsyncFifo #(
     output wire [WIDTH-1:0] read_data,
     output reg  [ABITS-1:0] read_available
 );
+    // 环形 FIFO 故意空出一个槽位区分满和空，因此 512 深度实际最多存 511 项。
     reg [ABITS-1:0] writePtr;
     reg [ABITS-1:0] writeGray;
     reg [ABITS-1:0] readPtr;
     reg [ABITS-1:0] readGray;
+    // 跨时钟域只传 Gray 指针；相邻计数只变化一位，再经过两级同步器。
     reg [ABITS-1:0] readGrayMeta, readGraySync;
     reg [ABITS-1:0] writeGrayMeta, writeGraySync;
 
@@ -159,11 +168,11 @@ module psramHdmiAsyncFifo #(
                                       (write_enable ? 1'b1 : 1'b0);
     wire [ABITS-1:0] readPtrNext = readPtr +
                                      (read_enable ? 1'b1 : 1'b0);
+    // SDPB 读口有一拍延迟，地址提前指向“本拍取走后的下一项”以持续预取。
     wire [ABITS-1:0] ramReadPtr = readPtrNext;
 
-    // One physical 16-kbit BSRAM, used as 512 x 16.  In 16-bit mode ADA[1:0]
-    // are byte-write enables and ADA[13:4]/ADB[13:4] are word addresses.
-    // Explicitly instantiating SDPB keeps this CDC buffer out of LUT/FF RAM.
+    // 显式实例化一块 SDPB BSRAM，配置成 512 x 16，避免综合成 LUT/FF RAM。
+    // 16 位模式下 ADA[1:0] 是两个字节写使能，ADA/ADB[13:4] 是字地址。
     wire [31:0] ramReadData;
     wire [13:0] ramWriteAddress =
         {{(10-ABITS){1'b0}}, writePtr, 2'b00, 2'b11};
@@ -195,8 +204,7 @@ module psramHdmiAsyncFifo #(
         end else begin
             readGrayMeta <= readGray;
             readGraySync <= readGrayMeta;
-            // Account for a write accepted on this edge.  Using writePtr here
-            // would leave the count one cycle stale at the full boundary.
+            // 用本拍写入后的 writePtrNext 计算剩余空间，避免队满边界慢一拍。
             write_free <= readPtrWrite - writePtrNext - 1'b1;
             if (write_enable) begin
                 writePtr <= writePtrNext;
@@ -215,9 +223,7 @@ module psramHdmiAsyncFifo #(
         end else begin
             writeGrayMeta <= writeGray;
             writeGraySync <= writeGrayMeta;
-            // Account for a read accepted on this edge.  This is the critical
-            // empty-boundary fix: the following cycle must not consume a
-            // second, unwritten BSRAM location.
+            // 用本拍读取后的 readPtrNext 计算剩余数据，避免队空时再多读一格旧数据。
             read_available <= writePtrRead - readPtrNext;
             if (read_enable) begin
                 readPtr <= readPtrNext;

@@ -1,8 +1,8 @@
 `timescale 1ns / 1ps
 `default_nettype none
 
-// 640x480 RGB565 DVI/HDMI transmitter.  Raster ordering matches the Tang Nano
-// SVO example: front porch, sync, back porch, then active pixels.
+// 640x480 RGB565 DVI/HDMI 发送器。扫描顺序沿用 Tang Nano SVO 例程：
+// 前肩、同步、后肩、有效画面。
 module hdmiTx #(
     parameter integer H_ACTIVE = 640,
     parameter integer H_FRONT  = 16,
@@ -34,9 +34,8 @@ module hdmiTx #(
     reg [9:0] vCount;
     reg [3:0] resetPipe = 4'b0000;
     reg [2:0] serializerRunPipe = 3'b000;
-    // Replicated final stages let the placer put one reset source beside each
-    // OSER10.  A single high-fanout reset FF otherwise consumes nearly an
-    // entire half serializer period just in routing.
+    // 为三个 OSER10 各复制一级复位寄存器，让布局器能把复位源放到串化器附近；
+    // 否则单个高扇出复位 FF 的布线延迟会接近半个串行时钟周期。
     (* syn_preserve = 1, syn_keep = 1 *) reg serializerRunBlue = 1'b0;
     (* syn_preserve = 1, syn_keep = 1 *) reg serializerRunGreen = 1'b0;
     (* syn_preserve = 1, syn_keep = 1 *) reg serializerRunRed = 1'b0;
@@ -45,9 +44,8 @@ module hdmiTx #(
         resetPipe <= {resetPipe[2:0], reset_n};
     wire pixelReset_n = resetPipe[3];
 
-    // OSER10 reset recovery is measured against the 126.667 MHz serializer
-    // clock, so release it in that domain.  Waiting for pixelReset_n also
-    // guarantees that the encoders have started before serialization begins.
+    // OSER10 的复位恢复时间按 126.667 MHz 串行时钟检查，所以在该时钟域释放；
+    // 同时等待 pixelReset_n，保证编码器先启动，再开始串行输出。
     always @(posedge serial_clk) begin
         serializerRunPipe <= {serializerRunPipe[1:0], pixelReset_n};
         serializerRunBlue <= serializerRunPipe[2];
@@ -55,10 +53,9 @@ module hdmiTx #(
         serializerRunRed <= serializerRunPipe[2];
     end
 
-    // The fabric-to-OSER reset route is almost exactly half a serializer
-    // period.  One explicit LUT makes deassertion occur safely *after* that
-    // falling edge, leaving nearly a full half-cycle before the next edge.
-    // The SDC excludes only these three intentional rollover reset paths.
+    // fabric 到 OSER 的复位路径接近半个串行周期。显式经过一级 LUT，让复位释放
+    // 落在下降沿之后，从而给下一个边沿留下接近完整的半周期；SDC 只排除这三条
+    // 有意设计的跨边沿复位路径。
     wire serializerResetBlue;
     wire serializerResetGreen;
     wire serializerResetRed;
@@ -72,6 +69,7 @@ module hdmiTx #(
     wire active = (hCount >= H_BLANK) && (vCount >= V_BLANK);
     wire hsync = (hCount >= H_FRONT) && (hCount < H_FRONT + H_SYNC);
     wire vsync = (vCount >= V_FRONT) && (vCount < V_FRONT + V_SYNC);
+    // 只在有效画面且 FIFO 非空时取走一个像素；消隐区不会消耗 FIFO。
     assign pixel_take = pixelReset_n && active && pixel_valid;
 
     always @(posedge pixel_clk) begin
@@ -80,6 +78,7 @@ module hdmiTx #(
             vCount <= 10'd0;
             underflow <= 1'b0;
         end else begin
+            // FIFO 断流时锁存 underflow，当前像素由 shownPixel 自动显示为黑色。
             if (active && !pixel_valid)
                 underflow <= 1'b1;
             if (hCount == H_TOTAL - 1) begin
