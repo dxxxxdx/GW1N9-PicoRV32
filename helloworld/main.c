@@ -230,4 +230,5 @@ const uint8_t ch0msg[] = "CH0 triggered!";
 void IRQ_Ch0_Handler(void)
 {
     UART_String(ch0msg, 14);
+
 }
